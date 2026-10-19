@@ -453,8 +453,13 @@ public sealed unsafe class StoreExecutor
             int? target = null;
             for (var i = 0; i < items.Length; i++)
             {
-                // InventoryType 9999 == unfilled. Only fill slots we own the item for.
-                if (items[i].InventoryType == 9999 && ownedItemIds.Contains(items[i].ItemId))
+                // InventoryType 9999 == unfilled. Flag: 0 = missing, 2 = unfilled, 3 = filled,
+                // 6 = the piece is already inside the stored outfit — handing a second copy
+                // into that slot would just waste it, so never target those.
+                var flag = (uint)items[i].Flag;
+                if (items[i].InventoryType == 9999
+                    && flag != 0 && flag != 6
+                    && ownedItemIds.Contains(items[i].ItemId))
                 {
                     target = i;
                     break;
@@ -641,7 +646,10 @@ public sealed unsafe class StoreExecutor
 
         _tm.EnqueueDelay(300);
 
-        // 7. Verify the deposit really happened by comparing dresser counts.
+        // 7. Verify the deposit really happened by comparing dresser counts. The count only
+        //    updates once the server response lands, so poll briefly instead of declaring
+        //    failure after a single read.
+        var verifyStart = DateTime.MinValue;
         _tm.Enqueue(() =>
         {
             // If a prism/error message set Detail already, keep it (skip verification).
@@ -657,6 +665,13 @@ public sealed unsafe class StoreExecutor
                 }
                 else
                 {
+                    if (verifyStart == DateTime.MinValue)
+                        verifyStart = DateTime.UtcNow;
+
+                    // after < 0 means the dresser data isn't readable yet — wait for it too.
+                    if (after < 0 || (DateTime.UtcNow - verifyStart).TotalMilliseconds < 4000)
+                        return false;
+
                     outcome.Success = false;
                     outcome.Detail = $"No deposit detected (dresser stayed {_countBeforeStore}).";
                 }
@@ -664,7 +679,7 @@ public sealed unsafe class StoreExecutor
             _log.Info($"[GlamourSorter] {outcome.SetName}: {outcome.Detail}");
             OnResult?.Invoke(outcome);
             return true;
-        }, $"Report: {plan.Set.Name}");
+        }, $"Report: {plan.Set.Name}", new TaskManagerConfiguration { TimeLimitMS = 10000, AbortOnTimeout = false });
     }
 
     private int _countBeforeStore;

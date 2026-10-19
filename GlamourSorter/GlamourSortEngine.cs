@@ -5,6 +5,7 @@ using Dalamud.Plugin.Services;
 using FFXIVClientStructs.FFXIV.Client.Game;
 using FFXIVClientStructs.FFXIV.Client.System.Framework;
 using FFXIVClientStructs.FFXIV.Client.UI.Agent;
+using FFXIVClientStructs.FFXIV.Client.UI.Misc;
 using Lumina.Excel.Sheets;
 using CSInventoryType = FFXIVClientStructs.FFXIV.Client.Game.InventoryType;
 using LuminaCabinet = Lumina.Excel.Sheets.Cabinet;
@@ -31,7 +32,7 @@ public enum SetSlot
 
 public sealed class OutfitSet
 {
-    public uint SetItemId;                 // MirageStoreSetItem row id
+    public uint SetItemId;                 // MirageStoreSetItem row id (also the outfit's Item row id)
     public string Name = "";
     // itemId that belongs in each of the 11 slots (0 = set doesn't use that slot)
     public readonly uint[] SlotItemIds = new uint[11];
@@ -60,8 +61,8 @@ public enum PlanKind
     CreateNew,          // set not stored at all; enough pieces held to make a new outfit
 }
 
-// Where this set should be deposited. Armoire-eligible sets are stored piece-by-piece in the
-// Armoire (free, unlimited) instead of consuming a Glamour Dresser slot as an outfit glamour.
+// Where this set should be deposited. Every set defaults to the dresser as an outfit glamour;
+// fully Armoire-eligible sets can be routed to the Armoire via the opt-in executor toggle.
 public enum StoreDestination
 {
     Dresser,
@@ -79,13 +80,19 @@ public sealed class SetPlan
     public readonly Dictionary<SetSlot, PieceLocation> Pieces = new();
     // slots that are already filled in the dresser (CompleteExisting only) — informational
     public readonly List<SetSlot> AlreadyFilled = new();
+    // piece itemIds in this plan whose appearance (model) is already in the dresser —
+    // informational: storing them still works, the user just may prefer to sell them
+    public readonly HashSet<uint> ModelDuplicateItemIds = new();
 }
 
 public sealed class SortResult
 {
     public readonly List<SetPlan> Plans = new();
-    // Pieces skipped because their whole set is already fully stored — the dupe case.
+    // Pieces skipped because their item is already stored in the dresser — the dupe case.
     public readonly List<PieceLocation> AlreadyStoredDuplicates = new();
+    // Pieces skipped because they are registered to a saved gear set (the game's own
+    // gearset-mark check). Storing those would break the gear set.
+    public readonly List<PieceLocation> GearsetPieces = new();
     public string? Error;
 }
 
@@ -96,7 +103,7 @@ public sealed unsafe class GlamourSortEngine
 
     // itemId -> the set(s) it can belong to
     private Dictionary<uint, HashSet<uint>> _itemToSets = new();
-    // setId -> OutfitSet
+    // setId (== outfit Item row id) -> OutfitSet
     private Dictionary<uint, OutfitSet> _sets = new();
     // base itemId -> Cabinet row id (Armoire eligibility)
     private Dictionary<uint, uint> _cabinetIdByItem = new();
@@ -131,6 +138,7 @@ public sealed unsafe class GlamourSortEngine
         try
         {
             var sheet = _data.GetExcelSheet<MirageStoreSetItem>();
+            var itemSheet = _data.GetExcelSheet<Item>();
             if (sheet == null)
             {
                 _log.Error("MirageStoreSetItem sheet unavailable.");
@@ -153,8 +161,7 @@ public sealed unsafe class GlamourSortEngine
                 for (var i = 0; i < 11; i++)
                     set.SlotItemIds[i] = slotIds[i];
 
-                // Name the set after the piece the set is keyed on (the Body is the usual anchor)
-                set.Name = ResolveSetName(row.RowId, slotIds);
+                set.Name = ResolveSetName(itemSheet, row.RowId, slotIds);
                 _sets[row.RowId] = set;
 
                 foreach (var id in slotIds.Where(id => id != 0).Distinct())
@@ -170,7 +177,7 @@ public sealed unsafe class GlamourSortEngine
 
             _log.Info($"GlamourSorter: indexed {_sets.Count} outfit sets, {_itemToSets.Count} member items.");
         }
-        catch (System.Exception ex)
+        catch (Exception ex)
         {
             _log.Error(ex, "GlamourSorter: failed to build set lookups. Plugin will load but sort will be empty.");
             _itemToSets = new Dictionary<uint, HashSet<uint>>();
@@ -229,9 +236,8 @@ public sealed unsafe class GlamourSortEngine
         return any;
     }
 
-    private string ResolveSetName(uint setRowId, uint[] slotIds)
+    private static string ResolveSetName(Lumina.Excel.ExcelSheet<Item>? itemSheet, uint setRowId, uint[] slotIds)
     {
-        var itemSheet = _data.GetExcelSheet<Item>();
         if (itemSheet == null) return $"Set {setRowId}";
         // The MirageStoreSetItem row id equals the "outfit" item id; prefer that name.
         if (itemSheet.TryGetRow(setRowId, out var outfitItem) && !outfitItem.Name.IsEmpty)
@@ -245,13 +251,17 @@ public sealed unsafe class GlamourSortEngine
     }
 
     // Read the dresser via the open PrismBox agent. Requires the dresser window to be open.
-    // Returns per-prism-box-index the itemId stored there, and which indices are outfit sets.
+    // Returns per-set the prism-box index that holds the stored outfit, the set of every
+    // stored item id (expanding outfit glamours into their constituent pieces), and the set
+    // of appearance keys (model) already present.
     private bool ReadDresser(
         out Dictionary<uint, (uint prismIndex, byte piecesAdded)> setToPrism,
-        out HashSet<uint> storedItemIds)
+        out HashSet<uint> storedItemIds,
+        out HashSet<(ulong ModelMain, ulong ModelSub)> storedModels)
     {
         setToPrism = new Dictionary<uint, (uint, byte)>();
         storedItemIds = new HashSet<uint>();
+        storedModels = new HashSet<(ulong, ulong)>();
 
         var agents = Framework.Instance()->UIModule->GetAgentModule();
         if (agents == null) return false;
@@ -259,8 +269,15 @@ public sealed unsafe class GlamourSortEngine
         if (dresser == null || !dresser->IsAgentActive() || dresser->Data == null)
             return false;
 
-        // First pass: which loose items are already in the dresser, and which sets are present.
-        for (var i = 0; i < 800; i++)
+        // PrismBoxItems is an expanded list (8000 entries): top-level dresser slots first,
+        // then the constituent pieces of stored outfit glamours. Wait for the async item-name
+        // load, otherwise dupe detection runs against a half-populated list.
+        if (!dresser->Data->IsAsyncLoadComplete)
+            return false;
+
+        var itemSheet = _data.GetExcelSheet<Item>();
+
+        for (var i = 0; i < 8000; i++)
         {
             var it = dresser->Data->PrismBoxItems[i];
             var itemId = it.ItemId;
@@ -268,13 +285,37 @@ public sealed unsafe class GlamourSortEngine
             if (itemId >= 1_000_000) itemId -= 1_000_000; // HQ marker
             storedItemIds.Add(itemId);
 
-            // If this slot is an outfit glamour, record the set it represents so we can
-            // target StoreExistingOutfit at it.
-            if (it.NumOutfitPiecesAdded != 0 && _itemToSets.TryGetValue(itemId, out var sets))
+            if (itemSheet != null && itemSheet.TryGetRow(itemId, out var storedRow))
             {
-                foreach (var setId in sets)
+                // Accessories and similar have no model (ModelMain == 0) — the item-id check
+                // above already covers them.
+                if (storedRow.ModelMain != 0)
+                    storedModels.Add((storedRow.ModelMain, storedRow.ModelSub));
+            }
+
+            if (it.NumOutfitPiecesAdded == 0)
+                continue;
+
+            // A stored outfit glamour's entry id is the outfit's Item row id, which equals the
+            // MirageStoreSetItem row id. Expand it: every constituent piece counts as stored
+            // (a second loose copy in the bags is a sellable duplicate, not a missing piece),
+            // and the set becomes a completion target.
+            if (_sets.TryGetValue(itemId, out var outfitSet))
+            {
+                if (!setToPrism.ContainsKey(outfitSet.SetItemId))
+                    setToPrism[outfitSet.SetItemId] = ((uint)i, it.NumOutfitPiecesAdded);
+
+                foreach (var pieceId in outfitSet.SlotItemIds)
                 {
-                    // Prefer the lowest prism index for a given set.
+                    if (pieceId != 0)
+                        storedItemIds.Add(pieceId);
+                }
+            }
+            else if (_itemToSets.TryGetValue(itemId, out var legacySets))
+            {
+                // Fallback for layouts where the entry id is a member item id instead.
+                foreach (var setId in legacySets)
+                {
                     if (!setToPrism.ContainsKey(setId))
                         setToPrism[setId] = ((uint)i, it.NumOutfitPiecesAdded);
                 }
@@ -285,11 +326,16 @@ public sealed unsafe class GlamourSortEngine
     }
 
     // Scan the player's bags + armoury for glamour-able pieces that belong to any known set.
-    private Dictionary<uint, PieceLocation> ScanHeldPieces()
+    // Pieces registered to a saved gear set are separated out: storing one would pull it out
+    // of the gear set (the game's own outfit window hides gear-set items for the same reason).
+    private (Dictionary<uint, PieceLocation> Held, List<PieceLocation> Gearset) ScanHeldPieces()
     {
-        var held = new Dictionary<uint, PieceLocation>(); // itemId -> first location found
+        var held = new Dictionary<uint, PieceLocation>();  // itemId -> first location found
+        var gearset = new List<PieceLocation>();
         var inv = InventoryManager.Instance();
-        if (inv == null) return held;
+        if (inv == null) return (held, gearset);
+
+        var gsm = RaptureGearsetModule.Instance();
 
         foreach (var container in _playerContainers)
         {
@@ -302,12 +348,22 @@ public sealed unsafe class GlamourSortEngine
                 var itemId = item->ItemId;
                 if (!_itemToSets.ContainsKey(itemId)) continue;
                 if (held.ContainsKey(itemId)) continue; // one physical piece is enough per slot
+
                 var hq = item->Flags.HasFlag(InventoryItem.ItemFlags.HighQuality);
-                held[itemId] = new PieceLocation(itemId, container, (ushort)s, hq);
+                var location = new PieceLocation(itemId, container, (ushort)s, hq);
+
+                // The same check the game uses to draw the gear-set mark on inventory icons.
+                if (gsm != null && gsm->IsItemRegisteredToGearset(item))
+                {
+                    gearset.Add(location);
+                    continue;
+                }
+
+                held[itemId] = location;
             }
         }
 
-        return held;
+        return (held, gearset);
     }
 
     // Which set slot does this itemId occupy for a given set?
@@ -329,15 +385,18 @@ public sealed unsafe class GlamourSortEngine
             return result;
         }
 
-        if (!ReadDresser(out var setToPrism, out var storedItemIds))
+        if (!ReadDresser(out var setToPrism, out var storedItemIds, out var storedModels))
         {
-            result.Error = "Open your Glamour Dresser first, then run the sort.";
+            result.Error = "Open your Glamour Dresser first (and wait a moment for it to load), then run the sort.";
             return result;
         }
 
-        var held = ScanHeldPieces();
+        var (held, gearsetPieces) = ScanHeldPieces();
+        result.GearsetPieces.AddRange(gearsetPieces);
         if (held.Count == 0)
             return result; // nothing to do; empty plan
+
+        var itemSheet = _data.GetExcelSheet<Item>();
 
         // Group held pieces by candidate set.
         var setCandidates = new Dictionary<uint, List<PieceLocation>>();
@@ -377,8 +436,9 @@ public sealed unsafe class GlamourSortEngine
                     var slot = SlotForItemInSet(set, piece.ItemId);
                     if (slot == null) continue;
 
-                    // If the exact piece is already stored anywhere in the dresser, it's a
-                    // true duplicate — leave it in the bag for the user to sell.
+                    // If the exact piece is already stored anywhere in the dresser (loose or
+                    // inside the stored outfit), it's a true duplicate — leave it in the bag
+                    // for the user to sell.
                     if (storedItemIds.Contains(piece.ItemId))
                     {
                         result.AlreadyStoredDuplicates.Add(piece);
@@ -389,7 +449,10 @@ public sealed unsafe class GlamourSortEngine
                 }
 
                 if (plan.Pieces.Count > 0)
+                {
+                    MarkModelDuplicates(plan, itemSheet, storedModels);
                     result.Plans.Add(plan);
+                }
             }
             else
             {
@@ -417,7 +480,10 @@ public sealed unsafe class GlamourSortEngine
                 }
 
                 if (plan.Pieces.Count > 0)
+                {
+                    MarkModelDuplicates(plan, itemSheet, storedModels);
                     result.Plans.Add(plan);
+                }
             }
         }
 
@@ -430,5 +496,30 @@ public sealed unsafe class GlamourSortEngine
         });
 
         return result;
+    }
+
+    // Informational only: flag planned pieces whose appearance is already in the dresser via
+    // another item. Storing them is still valid (and required to complete a set), but the
+    // user may prefer to sell them instead.
+    private static void MarkModelDuplicates(
+        SetPlan plan,
+        Lumina.Excel.ExcelSheet<Item>? itemSheet,
+        HashSet<(ulong ModelMain, ulong ModelSub)> storedModels)
+    {
+        if (itemSheet == null || storedModels.Count == 0)
+            return;
+
+        foreach (var piece in plan.Pieces.Values)
+        {
+            if (plan.ModelDuplicateItemIds.Contains(piece.ItemId))
+                continue;
+
+            if (itemSheet.TryGetRow(piece.ItemId, out var row)
+                && row.ModelMain != 0
+                && storedModels.Contains((row.ModelMain, row.ModelSub)))
+            {
+                plan.ModelDuplicateItemIds.Add(piece.ItemId);
+            }
+        }
     }
 }

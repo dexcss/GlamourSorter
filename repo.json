@@ -3,8 +3,8 @@
     "Author": "dexcss",
     "Name": "Glamour Sorter",
     "InternalName": "GlamourSorter",
-    "AssemblyVersion": "1.1.1.0",
-    "TestingAssemblyVersion": "1.1.1.0",
+    "AssemblyVersion": "1.2.0.0",
+    "TestingAssemblyVersion": "1.2.0.0",
     "Description": "Sorts glamour-able gear from your inventory into the Glamour Dresser as outfit glamours — including seasonal sets, with the Store as Outfit Glamour checkbox dialog automated. Completes existing outfit sets instead of creating duplicates, and leaves true duplicates in your bags to sell. Open your Glamour Dresser, run /gsort, review the preview, then store.",
     "ApplicableVersion": "any",
     "RepoUrl": "https://github.com/dexcss/GlamourSorter",
@@ -20,6 +20,12 @@
     "DownloadLinkInstall": "https://github.com/dexcss/GlamourSorter/releases/latest/download/GlamourSorter.zip",
     "DownloadLinkTesting": "https://github.com/dexcss/GlamourSorter/releases/latest/download/GlamourSorter.zip",
     "DownloadLinkUpdate": "https://github.com/dexcss/GlamourSorter/releases/latest/download/GlamourSorter.zip",
-    "TestingDalamudApiLevel": 15
+    "TestingDalamudApiLevel": 15,
+    "CategoryTags": [
+      "Utility",
+      "Inventory"
+    ],
+    "AcceptsFeedback": true,
+    "Changelog": "v1.2.0.0: Full audit. Gear-set protection — pieces registered to a saved gear set are now left in your bags (the same check the game uses for its gear-set icon mark), instead of being pulled out of your gear sets. Smarter duplicates — stored outfit glamours are expanded into their pieces, so a second copy of an already-stored piece is flagged as sellable instead of being re-stored. The dresser's expanded item list is scanned, and a never-fill guard skips window slots the game already marks as part of the stored outfit. New model-duplicate hints show when a planned piece shares its appearance with something already stored. Deposit verification now retries briefly instead of failing on a single read. UI: version in the title, live progress tally while storing, MANUAL tag priority, gear-set and model-duplicate sections. Removed diagnostic logging. v1.1.1.0: The Store as Outfit Glamour checkbox dialog is now automated (synthetic checkbox click + default-confirm callback); all sets route to the dresser. v1.1.0.0: Armoire routing added."
   }
 ]
