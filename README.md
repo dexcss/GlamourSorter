@@ -23,9 +23,9 @@
 4. Scans inventory + armoury for pieces belonging to any known set, classifies each, and builds a plan.
 5. On confirm:
    - **Dresser:** opens the game's outfit-creation window, hands over the pieces you own, clicks
-     `Store as Glamour`, and confirms the dialog with callback event `0` — the same default-confirm
-     path YesAlready and DailyRoutines use. This handles the normal Yes/No dialog and the
-     "Store as Outfit Glamour" acknowledgement for mixed sets.
+     `Store as Glamour`, and confirms the dialog. A plain Yes/No dialog uses the proven Yes event
+     (`2`); the mixed-set checkbox dialog uses the default-confirm event (`0`) — the same path
+     YesAlready and DailyRoutines use for `MiragePrismPrismSetConvertC`.
    - **Armoire:** requests the Armoire's Cabinet data with the game's own commands (`423`/`427`),
      then calls `UIState.Cabinet.StoreCabinetItem(cabinetId)` for each piece and verifies with
      `IsItemInCabinet`.
