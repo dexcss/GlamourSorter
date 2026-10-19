@@ -549,17 +549,28 @@ public sealed unsafe class StoreExecutor
             {
                 confirmAttempts++;
 
-                // Primary path: default confirm (event 0).
-                Callback.Fire(c.Base, true, 0);
-                _log.Info($"[GlamourSorter] Confirm {plan.Set.Name}: event 0 "
-                          + $"(attempt {confirmAttempts}, checkbox={hasCheckbox}, yesEnabled={yesEnabled}).");
-
-                // Fallback for a plain Yes/No dialog where event 0 was ignored: once the
-                // game has enabled Yes, fire the raw Yes event too.
-                if (confirmAttempts >= 3 && !hasCheckbox && yesEnabled)
+                if (hasCheckbox)
                 {
+                    // Mixed set: the dialog has the "Store as Outfit Glamour" acknowledgement.
+                    // Event 0 is the default-confirm callback YesAlready and DailyRoutines use
+                    // for this exact addon; it runs the addon's acknowledgement path.
+                    Callback.Fire(c.Base, true, 0);
+                    _log.Info($"[GlamourSorter] Confirm {plan.Set.Name}: event 0 (checkbox dialog, "
+                              + $"attempt {confirmAttempts}, yesEnabled={yesEnabled}).");
+                }
+                else if (yesEnabled)
+                {
+                    // Plain Yes/No dialog: event 2 is the proven Yes button for normal sets.
                     Callback.Fire(c.Base, true, 2);
-                    _log.Info($"[GlamourSorter] Confirm {plan.Set.Name}: fallback event 2.");
+                    _log.Info($"[GlamourSorter] Confirm {plan.Set.Name}: event 2 (plain Yes, "
+                              + $"attempt {confirmAttempts}).");
+                }
+                else if (confirmAttempts >= 4)
+                {
+                    // Last resort for a normal dialog whose Yes button is still disabled.
+                    Callback.Fire(c.Base, true, 0);
+                    _log.Info($"[GlamourSorter] Confirm {plan.Set.Name}: event 0 fallback "
+                              + $"(attempt {confirmAttempts}).");
                 }
             }
 

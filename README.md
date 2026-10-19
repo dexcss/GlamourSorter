@@ -74,10 +74,10 @@ Then (one command per line, PowerShell-safe):
 
 ```
 git add -A
-git commit -m "v1.1.0.0"
-git tag v1.1.0.0
+git commit -m "v1.1.0.1"
+git tag v1.1.0.1
 git push origin main
-git push origin v1.1.0.0
+git push origin v1.1.0.1
 ```
 
 The tag push triggers `.github/workflows/release.yml`, which builds and attaches

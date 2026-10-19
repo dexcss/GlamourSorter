@@ -6,13 +6,13 @@
     <Nullable>enable</Nullable>
     <LangVersion>latest</LangVersion>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
-    <Version>1.1.0.0</Version>
+    <Version>1.1.0.1</Version>
     <Authors>dexcss</Authors>
     <Company>dexcss</Company>
-    <Description>Sorts glamour-able gear from your inventory into the Glamour Dresser, completing existing outfit sets and creating new ones without wasteful duplicates.</Description>
+    <Description>Sorts glamour-able gear from your inventory into the Glamour Dresser and Armoire, completing existing outfit sets and creating new ones without wasteful duplicates.</Description>
     <AssemblyName>GlamourSorter</AssemblyName>
-    <AssemblyVersion>1.1.0.0</AssemblyVersion>
-    <FileVersion>1.1.0.0</FileVersion>
+    <AssemblyVersion>1.1.0.1</AssemblyVersion>
+    <FileVersion>1.1.0.1</FileVersion>
   </PropertyGroup>
 
   <ItemGroup>
