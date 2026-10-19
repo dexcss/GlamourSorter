@@ -525,10 +525,11 @@ public sealed unsafe class StoreExecutor
         _tm.EnqueueDelay(250);
 
         // 5. Confirm the outfit dialog.
-        //    Event 0 is the dialog's default-confirm callback — the same one YesAlready and
-        //    DailyRoutines fire for "MiragePrismPrismSetConvertC". Unlike the raw event ids
-        //    from the old probe, it runs the addon's own acknowledgement path, including the
-        //    "Store as Outfit Glamour" checkbox for Armoire-eligible outfits.
+        //    Plain Yes/No (normal sets): event 2, the proven Yes button from live testing.
+        //    Checkbox dialog (mixed/Armoire-eligible outfits): event 0, the default-confirm
+        //    callback YesAlready and DailyRoutines fire for "MiragePrismPrismSetConvertC".
+        //    Event 0 runs the addon's acknowledgement handler; raw ReceiveEvent ids from the
+        //    old probe do not.
         var confirmAttempts = 0;
         _tm.Enqueue(() =>
         {

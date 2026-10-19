@@ -12,7 +12,7 @@ public sealed class Plugin : IDalamudPlugin
     private const string Command = "/gsort";
 
     private readonly MainWindow _window;
-
+    private readonly StoreExecutor _executor;
 
     public Plugin(IDalamudPluginInterface pi)
     {
@@ -20,10 +20,9 @@ public sealed class Plugin : IDalamudPlugin
 
         var engine = new GlamourSortEngine(Svc.Data, Svc.Log);
         engine.BuildLookups();
-        var executor = new StoreExecutor(Svc.Log, engine);
-        // (checkbox=3, Yes=2, No=1). Those are now hardcoded; probe left disabled.
+        _executor = new StoreExecutor(Svc.Log, engine);
 
-        _window = new MainWindow(engine, executor);
+        _window = new MainWindow(engine, _executor);
         EzConfigGui.Init(_window, windowType: EzConfigGui.WindowType.Main);
 
         Svc.Commands.AddHandler(Command, new CommandInfo(OnCommand)
@@ -36,7 +35,8 @@ public sealed class Plugin : IDalamudPlugin
 
     public void Dispose()
     {
-
+        // Stop the framework-driven store loop before ECommons tears down its services.
+        _executor.Abort();
         Svc.Commands.RemoveHandler(Command);
         ECommonsMain.Dispose();
     }
