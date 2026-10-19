@@ -13,6 +13,7 @@ using FFXIVClientStructs.FFXIV.Client.System.Framework;
 using FFXIVClientStructs.FFXIV.Client.UI.Agent;
 using CSInventoryType = FFXIVClientStructs.FFXIV.Client.Game.InventoryType;
 using CSCabinet = FFXIVClientStructs.FFXIV.Client.Game.UI.Cabinet;
+using FFXIVClientStructs.FFXIV.Component.GUI;
 using TaskManager = ECommons.Automation.NeoTaskManager.TaskManager;
 using TaskManagerConfiguration = ECommons.Automation.NeoTaskManager.TaskManagerConfiguration;
 
@@ -28,25 +29,25 @@ public sealed class StoreOutcome
 }
 
 // Drives the real game UI for normal outfit glamours, and the native Cabinet API for
-// Armoire-eligible sets.
+// Armoire-eligible sets when the user opts into Armoire routing.
 //
-// Normal (non-Armoire) sets:
+// Dresser flow (default for every set):
 //   1. AgentMiragePrismPrismSetConvert.Open(...) anchored on a real inventory piece
 //   2. wait for "MiragePrismPrismSetConvert"
 //   3. TryHandOver() each owned slot
 //   4. StoreAsGlamour() (component 27)
-//   5. confirm "MiragePrismPrismSetConvertC" with callback event 0 (the same default-confirm
-//      path YesAlready and DailyRoutines use). If the dialog is a normal Yes/No this deposits.
+//   5. confirm "MiragePrismPrismSetConvertC":
+//        - plain Yes/No: callback event 2 (proven Yes)
+//        - "Store as Outfit Glamour" checkbox: event 0 first (the default-confirm YesAlready
+//          and DailyRoutines use), then a full synthetic checkbox click (deliver the box's
+//          registered ButtonClick event + force the checked bit) until Yes enables, then
+//          event 2 deposits
 //   6. verify the dresser count grew
 //
-// Armoire-eligible sets:
+// Armoire flow (opt-in via UseArmoireForEligibleSets):
 //   1. load the Armoire's Cabinet data (the game's own request commands, no Armoire UI needed)
 //   2. for each piece, call UIState.Cabinet.StoreCabinetItem(cabinetRowId)
 //   3. verify IsItemInCabinet() for each piece
-//
-// This deliberately avoids the old "force the Store as Outfit Glamour checkbox bit" hack:
-// writing AtkComponentButton.Flags made the box look ticked but skipped the addon's
-// acknowledgement handler, so the client accepted the click and deposited nothing.
 public sealed unsafe class StoreExecutor
 {
     private const string AddonMain = "MiragePrismPrismSetConvert";
@@ -64,9 +65,10 @@ public sealed unsafe class StoreExecutor
     public bool Busy => _tm.IsBusy || _driving;
     public Action<StoreOutcome>? OnResult;
 
-    // When true (default), sets whose entire definition is Armoire-eligible are stored in the
-    // Armoire piece-by-piece. When false they go through the dresser outfit-glamour flow.
-    public bool UseArmoireForEligibleSets = true;
+    // When false (default), every set — including seasonal/Armoire-eligible gear — is stored
+    // in the dresser as an outfit glamour (the checkbox dialog is automated). When true,
+    // fully Armoire-eligible sets are stored in the Armoire piece-by-piece instead.
+    public bool UseArmoireForEligibleSets = false;
 
     // Set ids we've already finished (stored or permanently failed) this run, so the
     // scan -> store-one -> rescan loop doesn't retry a set that can't progress.
@@ -524,13 +526,27 @@ public sealed unsafe class StoreExecutor
 
         _tm.EnqueueDelay(250);
 
-        // 5. Confirm the outfit dialog.
-        //    Plain Yes/No (normal sets): event 2, the proven Yes button from live testing.
-        //    Checkbox dialog (mixed/Armoire-eligible outfits): event 0, the default-confirm
-        //    callback YesAlready and DailyRoutines fire for "MiragePrismPrismSetConvertC".
-        //    Event 0 runs the addon's acknowledgement handler; raw ReceiveEvent ids from the
-        //    old probe do not.
+        // 5. Confirm the outfit dialog. Every layer below is ordered cheapest-first; each one
+        //    stops as soon as the deposit happens.
+        //      a) Plain Yes/No (normal sets): event 2 — the proven Yes callback (deposit
+        //         confirmed live once the dialog accepts).
+        //      b) Checkbox dialog ("Store as Outfit Glamour", shown for Armoire-eligible gear):
+        //         event 0 first — the default-confirm callback YesAlready and DailyRoutines fire
+        //         for this exact addon. The old attempts never tried it.
+        //      c) If the dialog is still open, replicate a real checkbox click. A real click does
+        //         TWO things the old attempts each did only half of:
+        //           - toggles the checked bit (AtkComponentCheckBox's own handler), and
+        //           - delivers ButtonClick (AtkEventType 25, "sent on MouseUp and MouseClick") to
+        //             the addon, whose handler enables Yes.
+        //         SetChecked alone flips the box but never enables Yes; delivering the event alone
+        //         flips nothing. Doing both — event first, then SetChecked + event again if the
+        //         box did not flip — covers whichever half owns the toggle.
+        //      d) When Yes is finally enabled, event 2 deposits (proven live with a real
+        //         checkbox tick + automated Yes).
+        var confirmStarted = DateTime.MinValue;
         var confirmAttempts = 0;
+        var zeroFired = false;
+        var checkboxClicks = 0;
         _tm.Enqueue(() =>
         {
             if (!GenericHelpers.TryGetAddonMaster<AddonMaster.MiragePrismPrismSetConvertC>(AddonConfirm, out var c)
@@ -545,41 +561,66 @@ public sealed unsafe class StoreExecutor
             var hasCheckbox = checkbox != null && checkbox->AtkResNode->IsVisible();
             var yes = c.YesButton;
             var yesEnabled = yes != null && yes->IsEnabled;
+            if (confirmStarted == DateTime.MinValue)
+                confirmStarted = DateTime.UtcNow;
+            var elapsedMs = (DateTime.UtcNow - confirmStarted).TotalMilliseconds;
 
-            if (EzThrottler.Throttle($"gsort_confirm_{plan.Set.SetItemId}", 500))
+            if (hasCheckbox)
             {
-                confirmAttempts++;
-
-                if (hasCheckbox)
+                // (b) one cheap default-confirm attempt before touching the checkbox.
+                if (!zeroFired && EzThrottler.Throttle($"gsort_zero_{plan.Set.SetItemId}", 600))
                 {
-                    // Mixed set: the dialog has the "Store as Outfit Glamour" acknowledgement.
-                    // Event 0 is the default-confirm callback YesAlready and DailyRoutines use
-                    // for this exact addon; it runs the addon's acknowledgement path.
+                    zeroFired = true;
                     Callback.Fire(c.Base, true, 0);
                     _log.Info($"[GlamourSorter] Confirm {plan.Set.Name}: event 0 (checkbox dialog, "
-                              + $"attempt {confirmAttempts}, yesEnabled={yesEnabled}).");
+                              + $"checked={checkbox->IsChecked}, yesEnabled={yesEnabled}).");
                 }
-                else if (yesEnabled)
+                // (c) full synthetic checkbox click, ~3/s, after giving event 0 a moment.
+                else if (zeroFired && elapsedMs >= 1200 && checkboxClicks < 15
+                         && EzThrottler.Throttle($"gsort_cb_{plan.Set.SetItemId}", 300))
                 {
-                    // Plain Yes/No dialog: event 2 is the proven Yes button for normal sets.
+                    checkboxClicks++;
+                    var delivered = DeliverCheckboxClick(checkbox, c.Base);
+                    if (!checkbox->IsChecked)
+                        checkbox->SetChecked(true);
+                    var yesNow = c.YesButton != null && c.YesButton->IsEnabled;
+                    _log.Info($"[GlamourSorter] Checkbox click {plan.Set.Name}: #{checkboxClicks} "
+                              + $"eventDelivered={delivered}, checked={checkbox->IsChecked}, "
+                              + $"yesEnabled={yesEnabled}.");
+                }
+            }
+            else if (yesEnabled)
+            {
+                if (EzThrottler.Throttle($"gsort_yes_{plan.Set.SetItemId}", 500))
+                {
+                    confirmAttempts++;
                     Callback.Fire(c.Base, true, 2);
                     _log.Info($"[GlamourSorter] Confirm {plan.Set.Name}: event 2 (plain Yes, "
                               + $"attempt {confirmAttempts}).");
                 }
-                else if (confirmAttempts >= 4)
-                {
-                    // Last resort for a normal dialog whose Yes button is still disabled.
-                    Callback.Fire(c.Base, true, 0);
-                    _log.Info($"[GlamourSorter] Confirm {plan.Set.Name}: event 0 fallback "
-                              + $"(attempt {confirmAttempts}).");
-                }
+            }
+            else if (elapsedMs >= 2000 && EzThrottler.Throttle($"gsort_zero_{plan.Set.SetItemId}", 1000))
+            {
+                // Plain dialog but Yes never enabled — fall back to the default-confirm callback.
+                confirmAttempts++;
+                Callback.Fire(c.Base, true, 0);
+                _log.Info($"[GlamourSorter] Confirm {plan.Set.Name}: event 0 fallback (plain dialog, "
+                          + $"attempt {confirmAttempts}).");
             }
 
-            if (confirmAttempts >= 12)
+            // (d) checkbox dialog: deposit the moment the game enables Yes.
+            if (hasCheckbox && yesEnabled && EzThrottler.Throttle($"gsort_cbyes_{plan.Set.SetItemId}", 500))
+            {
+                confirmAttempts++;
+                Callback.Fire(c.Base, true, 2);
+                _log.Info($"[GlamourSorter] Confirm {plan.Set.Name}: checkbox accepted, firing event 2.");
+            }
+
+            if (elapsedMs >= 15000 || confirmAttempts >= 12)
             {
                 outcome.NeedsManual = true;
                 outcome.Detail = hasCheckbox
-                    ? "Confirmation did not accept the outfit (Armoire checkbox). Left for manual review."
+                    ? "Confirmation did not accept the outfit (Store as Outfit Glamour checkbox). Left for manual review."
                     : "Confirmation did not accept. Left for manual review.";
                 _log.Warning($"[GlamourSorter] {outcome.SetName}: {outcome.Detail}");
                 Callback.Fire(c.Base, true, 1); // No / cancel — leaves the items in bags
@@ -587,7 +628,7 @@ public sealed unsafe class StoreExecutor
             }
 
             return false;
-        }, $"Confirm: {plan.Set.Name}", new TaskManagerConfiguration { TimeLimitMS = 12000, AbortOnTimeout = false });
+        }, $"Confirm: {plan.Set.Name}", new TaskManagerConfiguration { TimeLimitMS = 18000, AbortOnTimeout = false });
 
         // 6. Wait for the confirm dialog to actually close, then verify the dresser grew.
         _tm.Enqueue(() =>
@@ -637,5 +678,28 @@ public sealed unsafe class StoreExecutor
             if (d->Data->PrismBoxItems[i].ItemId != 0)
                 n++;
         return n;
+    }
+
+    // Deliver the checkbox's registered ButtonClick event to the addon — the notification half
+    // of a real click (AtkEventType.ButtonClick = 25 is what AtkComponentButton/CheckBox emits
+    // on MouseUp/MouseClick). A real click also toggles the checked bit inside the component;
+    // when a synthetic delivery does not flip it, the caller forces it with SetChecked. Both
+    // halves together are what make the addon's Yes-enable handler accept the box — which is
+    // why SetChecked alone or the event alone each failed in the old attempts.
+    private static bool DeliverCheckboxClick(AtkComponentCheckBox* checkbox, AtkUnitBase* addon)
+    {
+        if (checkbox == null || checkbox->OwnerNode == null)
+            return false;
+
+        var res = &checkbox->OwnerNode->AtkResNode;
+        var evt = res->AtkEventManager.Event;
+        while (evt != null && evt->State.EventType != AtkEventType.ButtonClick)
+            evt = evt->NextEvent;
+        if (evt == null)
+            return false;
+
+        var data = stackalloc AtkEventData[1];
+        addon->ReceiveEvent(evt->State.EventType, (int)evt->Param, evt, data);
+        return true;
     }
 }

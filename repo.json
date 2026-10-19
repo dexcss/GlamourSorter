@@ -3,9 +3,9 @@
     "Author": "dexcss",
     "Name": "Glamour Sorter",
     "InternalName": "GlamourSorter",
-    "AssemblyVersion": "1.1.0.2",
-    "TestingAssemblyVersion": "1.1.0.2",
-    "Description": "Sorts glamour-able gear from your inventory into the Glamour Dresser and Armoire. Normal sets are stored as outfit glamours; seasonal/Armoire-eligible sets go to the Armoire without using a dresser slot. Completes existing outfit sets instead of creating duplicates, and leaves true duplicates in your bags to sell. Open your Glamour Dresser, run /gsort, review the preview, then store.",
+    "AssemblyVersion": "1.1.1.0",
+    "TestingAssemblyVersion": "1.1.1.0",
+    "Description": "Sorts glamour-able gear from your inventory into the Glamour Dresser as outfit glamours — including seasonal sets, with the Store as Outfit Glamour checkbox dialog automated. Completes existing outfit sets instead of creating duplicates, and leaves true duplicates in your bags to sell. Open your Glamour Dresser, run /gsort, review the preview, then store.",
     "ApplicableVersion": "any",
     "RepoUrl": "https://github.com/dexcss/GlamourSorter",
     "Tags": [

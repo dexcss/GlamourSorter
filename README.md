@@ -1,16 +1,16 @@
 # Glamour Sorter
 
-`/gsort` — sorts glamour-able gear from your inventory into the Glamour Dresser **and Armoire**.
+`/gsort` — sorts glamour-able gear from your inventory into the Glamour Dresser as outfit glamours.
 
-- **Normal sets** are stored as outfit glamours in the Glamour Dresser.
-- **Armoire-eligible sets** (seasonal/event gear) are stored piece-by-piece in the **Armoire**.
-  No dresser slot and no glamour prisms are used.
+- **Every set goes to the dresser** (including seasonal/Armoire-eligible gear) and becomes an outfit glamour.
+- **The "Store as Outfit Glamour" checkbox dialog is automated** — see below for how.
 - **Completes existing outfits.** If a set is already stored as an outfit glamour, missing pieces you
   hold are added to *that* set — no wasteful duplicate slot.
 - **Leaves true duplicates alone.** If the exact piece is already in the dresser, it's left in your
   bags so you can sell/expert-deliver it yourself.
-- **Preview first.** Nothing stores until you click. Scan shows every planned deposit and the
-  destination (Dresser or Armoire); you confirm per-set or "Store All Below."
+- **Preview first.** Nothing stores until you click. Scan shows every planned deposit; you confirm
+  per-set or "Store All Below."
+- Optional: send fully Armoire-eligible sets to the Armoire instead (piece-by-piece, no dresser slot).
 
 ## How it works
 
@@ -19,39 +19,44 @@
 2. Builds set membership from the `MirageStoreSetItem` sheet (11 slots, in column order: MainHand,
    OffHand, Head, Body, Hands, Legs, Feet, Earrings, Necklace, Bracelets, Ring).
 3. Builds the Armoire eligibility map from the `Cabinet` sheet (base item id → Cabinet row id).
-   A set is routed to the Armoire only when **every** slot it defines is Armoire-eligible.
 4. Scans inventory + armoury for pieces belonging to any known set, classifies each, and builds a plan.
-5. On confirm:
-   - **Dresser:** opens the game's outfit-creation window, hands over the pieces you own, clicks
-     `Store as Glamour`, and confirms the dialog. A plain Yes/No dialog uses the proven Yes event
-     (`2`); the mixed-set checkbox dialog uses the default-confirm event (`0`) — the same path
-     YesAlready and DailyRoutines use for `MiragePrismPrismSetConvertC`.
-   - **Armoire:** requests the Armoire's Cabinet data with the game's own commands (`423`/`427`),
-     then calls `UIState.Cabinet.StoreCabinetItem(cabinetId)` for each piece and verifies with
-     `IsItemInCabinet`.
+5. On confirm, drives the game's own outfit-creation window:
+   - `AgentMiragePrismPrismSetConvert.Open(...)` anchored on a real piece, hand over the owned slots,
+     click `Store as Glamour` (component 27).
+   - Confirm `MiragePrismPrismSetConvertC`:
+     - plain Yes/No dialog → callback event `2` (proven Yes);
+     - checkbox dialog → callback event `0` first (the default-confirm YesAlready and DailyRoutines
+       use for this addon), then a full synthetic checkbox click until Yes enables, then event `2`.
+
+## Why the checkbox works now
+
+A real click on the "Store as Outfit Glamour" checkbox does **two** things, and the old attempts each
+did only one:
+
+- it toggles the checked bit (`AtkComponentButton.Flags` bit `0x40000`), **and**
+- it delivers `AtkEventType.ButtonClick` (25) — the event AtkComponentButton/CheckBox emits on
+  MouseUp/MouseClick — to the addon, whose handler enables Yes.
+
+`SetChecked(true)` alone flips the box but skips the handler, so Yes stayed disabled. ECommons'
+`ClickCheckBox` delivers the event but never toggles, so the box never flipped. The plugin now does
+both — deliver the checkbox's registered ButtonClick event, then force the checked bit with
+`SetChecked` if the handler did not flip it — and fires Yes (event `2`) the moment the game enables it.
+As a first attempt it also fires callback `0`, the default-confirm path two major automation plugins
+use for this exact dialog.
 
 ## Usage
 
-1. Open your Glamour Dresser in-game. (The Armoire data is requested automatically when needed; if it
-   cannot load, open the Armoire once and retry.)
+1. Open your Glamour Dresser in-game.
 2. `/gsort` → **Scan**.
 3. Review the preview. Store per-set or all at once.
 
-## Why the old Armoire blocker is gone
-
-The old build tried to force the `Store as Outfit Glamour` checkbox by writing the checked bit on the
-component. That only changed the visual state; it skipped the addon's acknowledgement handler, so the
-client accepted the click and deposited nothing. Seasonal gear is Armoire-eligible, so the correct
-destination is the Armoire itself. The Armoire path above is the same native command the game uses for
-"Store in Armoire", and it does not touch the outfit dialog at all.
-
 ## Risk notes
 
-- The Armoire path requires the Cabinet data to be loaded. The plugin requests it automatically; if
-  the server does not answer, the result is reported and the items stay in your bags.
-- The dresser path still requires the Glamour Dresser to stay open during a store.
+- The dresser must stay open during a store; the plugin re-checks the agent is active before each step.
 - Server rejects a deposit if you own a unique copy or lack inventory space — reported in the results
   log, nothing lost.
+- If a confirmation still refuses after ~15s the set is cancelled (items stay in bags) and marked
+  **MANUAL** in the results.
 - First run: test on a known throwaway set to confirm behavior against your live client.
 
 ## Build
@@ -74,10 +79,10 @@ Then (one command per line, PowerShell-safe):
 
 ```
 git add -A
-git commit -m "v1.1.0.2"
-git tag v1.1.0.2
+git commit -m "v1.1.1.0"
+git tag v1.1.1.0
 git push origin main
-git push origin v1.1.0.2
+git push origin v1.1.1.0
 ```
 
 The tag push triggers `.github/workflows/release.yml`, which builds and attaches

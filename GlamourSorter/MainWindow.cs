@@ -38,12 +38,13 @@ public sealed class MainWindow : Window
 
         {
             var armoire = _executor.UseArmoireForEligibleSets;
-            if (ImGui.Checkbox("Store Armoire-eligible sets in the Armoire", ref armoire))
+            if (ImGui.Checkbox("Send Armoire-eligible sets to the Armoire instead", ref armoire))
                 _executor.UseArmoireForEligibleSets = armoire;
             if (ImGui.IsItemHovered())
-                ImGui.SetTooltip("On (recommended): seasonal/event sets go to the Armoire piece-by-piece.\n"
-                    + "No Glamour Dresser slot or glamour prisms are used.\n"
-                    + "Off: try to store them as outfit glamours in the dresser instead (uses a slot).");
+                ImGui.SetTooltip("Off (default): every set is stored in the dresser as an outfit\n"
+                    + "glamour — the seasonal checkbox dialog is automated.\n"
+                    + "On: seasonal/event sets go to the Armoire piece-by-piece instead\n"
+                    + "(no dresser slot or prisms used).");
         }
 
         if (busy) ImGui.BeginDisabled();
