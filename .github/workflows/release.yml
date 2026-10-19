@@ -1,0 +1,56 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+
+      - name: Download Dalamud
+        shell: pwsh
+        run: |
+          $hooks = Join-Path $env:AppData 'XIVLauncher\addon\Hooks\dev'
+          New-Item -ItemType Directory -Force -Path $hooks | Out-Null
+          Invoke-WebRequest -Uri https://goatcorp.github.io/dalamud-distrib/latest.zip -OutFile latest.zip
+          Expand-Archive -Force latest.zip $hooks
+
+      - name: Restore
+        run: dotnet restore GlamourSorter/GlamourSorter.csproj
+
+      - name: Build
+        run: dotnet build GlamourSorter/GlamourSorter.csproj --configuration Release --no-restore
+
+      - name: Locate package
+        id: pkg
+        shell: pwsh
+        run: |
+          $zip = Get-ChildItem -Path GlamourSorter/bin -Recurse -Filter latest.zip | Select-Object -First 1
+          if (-not $zip) { throw "latest.zip not found - DalamudPackager did not run" }
+          Copy-Item $zip.FullName 'GlamourSorter.zip' -Force
+          $out = (Resolve-Path 'GlamourSorter.zip').Path
+          "path=$out" >> $env:GITHUB_OUTPUT
+
+      - name: Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2.2.1
+        with:
+          files: |
+            ${{ steps.pkg.outputs.path }}
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

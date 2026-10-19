@@ -1,0 +1,22 @@
+<Project Sdk="Dalamud.NET.Sdk/15.0.0">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <Platforms>x64</Platforms>
+    <Nullable>enable</Nullable>
+    <LangVersion>latest</LangVersion>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <Version>1.1.0.0</Version>
+    <Authors>dexcss</Authors>
+    <Company>dexcss</Company>
+    <Description>Sorts glamour-able gear from your inventory into the Glamour Dresser, completing existing outfit sets and creating new ones without wasteful duplicates.</Description>
+    <AssemblyName>GlamourSorter</AssemblyName>
+    <AssemblyVersion>1.1.0.0</AssemblyVersion>
+    <FileVersion>1.1.0.0</FileVersion>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="ECommons" Version="3.2.0.9" />
+  </ItemGroup>
+
+</Project>
