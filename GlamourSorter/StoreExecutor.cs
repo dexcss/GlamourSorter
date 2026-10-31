@@ -10,6 +10,7 @@ using ECommons.UIHelpers.AddonMasterImplementations;
 using FFXIVClientStructs.FFXIV.Client.Game;
 using FFXIVClientStructs.FFXIV.Client.Game.UI;
 using FFXIVClientStructs.FFXIV.Client.System.Framework;
+using FFXIVClientStructs.FFXIV.Client.UI;
 using FFXIVClientStructs.FFXIV.Client.UI.Agent;
 using CSInventoryType = FFXIVClientStructs.FFXIV.Client.Game.InventoryType;
 using CSCabinet = FFXIVClientStructs.FFXIV.Client.Game.UI.Cabinet;
@@ -23,6 +24,9 @@ public sealed class StoreOutcome
 {
     public string SetName = "";
     public bool Success;
+    // Nothing was stored because the outfit already contains every planned piece — not a failure,
+    // but not a store either, so it must not count as "stored".
+    public bool AlreadyPresent;
     public bool NeedsManual;
     public StoreDestination Destination;
     public string Detail = "";
@@ -799,7 +803,7 @@ public sealed unsafe class StoreExecutor
                 {
                     // Everything we planned is already inside the stored outfit — there is nothing to
                     // deposit, and reporting it as an "ok" (not a failure) matches what the user sees.
-                    outcome.Success = true;
+                    outcome.AlreadyPresent = true;
                     outcome.Detail = "Already in the stored outfit — nothing to add.";
                     _log.Info($"[GlamourSorter] {outcome.SetName}: {outcome.Detail}");
                     return true;
@@ -884,7 +888,14 @@ public sealed unsafe class StoreExecutor
 
             // Partial sets ARE storable. The game's own signal for "can store now" is the
             // StoreAsGlamour button being enabled — don't require every slot filled.
-            var btn = m.StoreAsGlamourButton;
+            // Click the button through the addon struct itself (what YesAlready does); the ECommons
+            // helper resolves a component id that differs in the "Outfit Glamour Creation" window
+            // variant, which made the click a no-op there.
+            var addonPtr = Svc.GameGui.GetAddonByName(AddonMain, 1);
+            var setConvert = addonPtr.Address == IntPtr.Zero
+                ? null
+                : (AddonMiragePrismPrismSetConvert*)addonPtr.Address;
+            var btn = setConvert == null ? null : setConvert->StoreAsGlamourButton;
             if (btn == null || !btn->IsEnabled)
             {
                 outcome.Detail = "Store button not enabled (nothing storable).";
@@ -916,6 +927,7 @@ public sealed unsafe class StoreExecutor
             _countBeforeStore = CountDresser();
             _log.Info($"[GlamourSorter] Store {plan.Set.Name}: dresser entries before={_countBeforeStore}.");
             m.StoreAsGlamour();
+            _log.Info($"[GlamourSorter] Store {plan.Set.Name}: clicked Store as Glamour.");
             return true;
         }, $"Store: {plan.Set.Name}",
         new TaskManagerConfiguration { TimeLimitMS = 10000, AbortOnTimeout = false });

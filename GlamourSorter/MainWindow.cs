@@ -32,6 +32,7 @@ public sealed class MainWindow : ShellWindow
     private string _status = "Open your Glamour Dresser, then click Scan.";
     private bool _wasBusy;
     private int _okCount;
+    private int _alreadyCount;
     private int _manualCount;
     private int _failCount;
 
@@ -73,10 +74,12 @@ public sealed class MainWindow : ShellWindow
         _executor.OnResult = o =>
         {
             _log.Add(o);
-            if (o.NeedsManual) _manualCount++;
+            if (o.AlreadyPresent) _alreadyCount++;
+            else if (o.NeedsManual) _manualCount++;
             else if (o.Success) _okCount++;
             else _failCount++;
-            _status = $"Storing… {_okCount} stored, {_manualCount} need attention, {_failCount} failed.";
+            _status = $"Storing… {_okCount} stored, {_alreadyCount} already there, "
+                      + $"{_manualCount} need attention, {_failCount} failed.";
         };
 
         Size = new Vector2(520f, 620f);
@@ -137,7 +140,8 @@ public sealed class MainWindow : ShellWindow
         // shows from the next frame — same as before the reskin).
         var busy = _executor.Busy;
         if (_wasBusy && !busy && _log.Count > 0 && _status.StartsWith("Storing", StringComparison.Ordinal))
-            _status = $"Finished: {_okCount} stored, {_manualCount} need attention, {_failCount} failed.";
+            _status = $"Finished: {_okCount} stored, {_alreadyCount} already there, "
+                      + $"{_manualCount} need attention, {_failCount} failed.";
         _wasBusy = busy;
     }
 
@@ -272,9 +276,11 @@ public sealed class MainWindow : ShellWindow
         UiKit.Section(FontAwesomeIcon.ListUl, "results");
         foreach (var o in _log)
         {
-            var (tag, color) = o.NeedsManual
-                ? ("MANUAL", Theme.Warn)
-                : o.Success ? ("OK", Theme.Good) : ("SKIP", Theme.Danger);
+            var (tag, color) = o.AlreadyPresent
+                ? ("ALREADY", Theme.Muted)
+                : o.NeedsManual
+                    ? ("MANUAL", Theme.Warn)
+                    : o.Success ? ("OK", Theme.Good) : ("SKIP", Theme.Danger);
             UiKit.Chip(tag, color);
             ImGui.SameLine();
             ImGui.PushTextWrapPos(ImGui.GetCursorPosX() + ImGui.GetContentRegionAvail().X);
@@ -508,6 +514,7 @@ public sealed class MainWindow : ShellWindow
     private void ResetCounters()
     {
         _okCount = 0;
+        _alreadyCount = 0;
         _manualCount = 0;
         _failCount = 0;
     }
