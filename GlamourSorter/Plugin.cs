@@ -1,8 +1,8 @@
 using Dalamud.Game.Command;
+using Dalamud.Interface.Windowing;
 using Dalamud.Plugin;
 using ECommons;
 using ECommons.DalamudServices;
-using ECommons.SimpleGui;
 
 namespace GlamourSorter;
 
@@ -13,6 +13,7 @@ public sealed class Plugin : IDalamudPlugin
 
     private readonly MainWindow _window;
     private readonly StoreExecutor _executor;
+    private readonly WindowSystem _windowSystem = new("GlamourSorter");
 
     public Plugin(IDalamudPluginInterface pi)
     {
@@ -22,8 +23,14 @@ public sealed class Plugin : IDalamudPlugin
         engine.BuildLookups();
         _executor = new StoreExecutor(Svc.Log, engine);
 
+        // Fancy UI shell: the window draws its own title bar, so it is registered with a plain
+        // WindowSystem instead of ECommons' ConfigWindow wrapper (this plugin has no settings to
+        // persist).
         _window = new MainWindow(engine, _executor);
-        EzConfigGui.Init(_window, windowType: EzConfigGui.WindowType.Main);
+        _windowSystem.AddWindow(_window);
+        Svc.PluginInterface.UiBuilder.Draw += _windowSystem.Draw;
+        Svc.PluginInterface.UiBuilder.OpenMainUi += OpenMainUi;
+        Svc.PluginInterface.UiBuilder.OpenConfigUi += OpenMainUi;
 
         Svc.Commands.AddHandler(Command, new CommandInfo(OnCommand)
         {
@@ -31,12 +38,18 @@ public sealed class Plugin : IDalamudPlugin
         });
     }
 
-    private void OnCommand(string command, string args) => EzConfigGui.Toggle();
+    private void OpenMainUi() => _window.IsOpen = true;
+
+    private void OnCommand(string command, string args) => _window.Toggle();
 
     public void Dispose()
     {
         // Stop the framework-driven store loop before ECommons tears down its services.
         _executor.Abort();
+        Svc.PluginInterface.UiBuilder.Draw -= _windowSystem.Draw;
+        Svc.PluginInterface.UiBuilder.OpenMainUi -= OpenMainUi;
+        Svc.PluginInterface.UiBuilder.OpenConfigUi -= OpenMainUi;
+        _windowSystem.RemoveAllWindows();
         Svc.Commands.RemoveHandler(Command);
         ECommonsMain.Dispose();
     }

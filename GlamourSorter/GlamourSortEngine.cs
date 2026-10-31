@@ -94,6 +94,9 @@ public sealed class SortResult
     // gearset-mark check). Storing those would break the gear set.
     public readonly List<PieceLocation> GearsetPieces = new();
     public string? Error;
+    // True when the error is a "the dresser isn't answering right now" condition — the store loop
+    // retries those for a while instead of abandoning the rest of the run.
+    public bool ErrorIsTransient;
 }
 
 public sealed unsafe class GlamourSortEngine
@@ -263,7 +266,11 @@ public sealed unsafe class GlamourSortEngine
         storedItemIds = new HashSet<uint>();
         storedModels = new HashSet<(ulong, ulong)>();
 
-        var agents = Framework.Instance()->UIModule->GetAgentModule();
+        // Logout / zone transitions can leave the UI module temporarily unavailable; treat that as
+        // "dresser not ready" instead of dereferencing a null pointer.
+        var fw = Framework.Instance();
+        if (fw == null || fw->UIModule == null) return false;
+        var agents = fw->UIModule->GetAgentModule();
         if (agents == null) return false;
         var dresser = (AgentMiragePrismPrismBox*)agents->GetAgentByInternalId(AgentId.MiragePrismPrismBox);
         if (dresser == null || !dresser->IsAgentActive() || dresser->Data == null)
@@ -297,18 +304,33 @@ public sealed unsafe class GlamourSortEngine
                 continue;
 
             // A stored outfit glamour's entry id is the outfit's Item row id, which equals the
-            // MirageStoreSetItem row id. Expand it: every constituent piece counts as stored
-            // (a second loose copy in the bags is a sellable duplicate, not a missing piece),
-            // and the set becomes a completion target.
+            // MirageStoreSetItem row id, so record it as a completion target.
+            //
+            // The sheet definition must NOT be blanket-expanded into storedItemIds: the expanded
+            // PrismBoxItems list already carries one entry per piece of every stored outfit (those
+            // entries are what the dresser UI lists, and their Slot is >= 800), so the pieces are
+            // already in storedItemIds above. Expanding the whole definition would also mark the
+            // pieces a *partially* stored outfit is missing — and those are exactly the pieces the
+            // completion feature has to store; marking them stored would report them as
+            // "already stored, safe to sell" and leave CompleteExisting with nothing to plan.
+            // Expansion is only correct when the outfit is complete (all its defined pieces are
+            // inside it), so gate it on the outfit's own piece count.
             if (_sets.TryGetValue(itemId, out var outfitSet))
             {
                 if (!setToPrism.ContainsKey(outfitSet.SetItemId))
                     setToPrism[outfitSet.SetItemId] = ((uint)i, it.NumOutfitPiecesAdded);
 
+                var definedPieces = 0;
                 foreach (var pieceId in outfitSet.SlotItemIds)
+                    if (pieceId != 0) definedPieces++;
+
+                if (it.NumOutfitPiecesAdded >= definedPieces)
                 {
-                    if (pieceId != 0)
-                        storedItemIds.Add(pieceId);
+                    foreach (var pieceId in outfitSet.SlotItemIds)
+                    {
+                        if (pieceId != 0)
+                            storedItemIds.Add(pieceId);
+                    }
                 }
             }
             else if (_itemToSets.TryGetValue(itemId, out var legacySets))
@@ -388,11 +410,15 @@ public sealed unsafe class GlamourSortEngine
         if (!ReadDresser(out var setToPrism, out var storedItemIds, out var storedModels))
         {
             result.Error = "Open your Glamour Dresser first (and wait a moment for it to load), then run the sort.";
+            result.ErrorIsTransient = true;
             return result;
         }
 
         var (held, gearsetPieces) = ScanHeldPieces();
         result.GearsetPieces.AddRange(gearsetPieces);
+        _log.Info($"[GlamourSorter] Scan: dresser has {storedItemIds.Count} distinct stored item id(s) "
+                  + $"and {setToPrism.Count} stored outfit(s); {held.Count} set piece(s) held, "
+                  + $"{gearsetPieces.Count} gear-set piece(s) left alone.");
         if (held.Count == 0)
             return result; // nothing to do; empty plan
 
@@ -441,7 +467,7 @@ public sealed unsafe class GlamourSortEngine
                     // for the user to sell.
                     if (storedItemIds.Contains(piece.ItemId))
                     {
-                        result.AlreadyStoredDuplicates.Add(piece);
+                        AddDuplicate(result, piece);
                         plan.AlreadyFilled.Add(slot.Value);
                         continue;
                     }
@@ -473,7 +499,7 @@ public sealed unsafe class GlamourSortEngine
                     if (slot == null) continue;
                     if (storedItemIds.Contains(piece.ItemId))
                     {
-                        result.AlreadyStoredDuplicates.Add(piece);
+                        AddDuplicate(result, piece);
                         continue;
                     }
                     plan.Pieces.TryAdd(slot.Value, piece);
@@ -496,6 +522,15 @@ public sealed unsafe class GlamourSortEngine
         });
 
         return result;
+    }
+
+    // A piece can belong to more than one set; report each physical piece once.
+    private static void AddDuplicate(SortResult result, PieceLocation piece)
+    {
+        foreach (var existing in result.AlreadyStoredDuplicates)
+            if (existing.ItemId == piece.ItemId && existing.Container == piece.Container && existing.Slot == piece.Slot)
+                return;
+        result.AlreadyStoredDuplicates.Add(piece);
     }
 
     // Informational only: flag planned pieces whose appearance is already in the dresser via

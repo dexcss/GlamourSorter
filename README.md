@@ -5,15 +5,19 @@
 - **Every set goes to the dresser** (including seasonal/Armoire-eligible gear) and becomes an outfit glamour.
 - **The "Store as Outfit Glamour" checkbox dialog is automated** — see below for how.
 - **Completes existing outfits.** If a set is already stored as an outfit glamour, missing pieces you
-  hold are added to *that* set — no wasteful duplicate slot.
+  hold are added to *that* set — no wasteful duplicate slot. Works when the stored outfit only
+  contains some of the set's pieces, too.
 - **Protects your gear sets.** Pieces registered to a saved gear set are left in your bags (the same
   check the game uses for its gear-set icon mark) — they're never pulled into the dresser.
-- **Leaves true duplicates alone.** Stored outfit glamours are expanded into their pieces and the
-  dresser's full expanded item list is scanned, so a second copy of anything already stored is left
-  in your bags to sell. Planned pieces that merely share an appearance with something stored get a
-  "model already in dresser" hint so you can decide.
+- **Leaves true duplicates alone.** The dresser's full expanded item list is scanned, including the
+  individual pieces inside stored outfit glamours, so a second copy of anything already stored is
+  left in your bags to sell. Planned pieces that merely share an appearance with something stored
+  get a "model already in dresser" hint so you can decide.
 - **Preview first.** Nothing stores until you click. Scan shows every planned deposit; you confirm
   per-set or "Store All Below."
+- **Fancy UI shell.** Borderless, hand-drawn window from the shared Fancy UI kit
+  (`Documents\FancyUI`, also vendored by Market Helper and Venue Helper) — custom title bar,
+  cards, rectangular toggle, gradient actions; behaviour code is untouched by the skin.
 - Optional: send fully Armoire-eligible sets to the Armoire instead (piece-by-piece, no dresser slot).
 
 ## How it works
@@ -83,10 +87,10 @@ Then (one command per line, PowerShell-safe):
 
 ```
 git add -A
-git commit -m "v1.2.0.0"
-git tag v1.2.0.0
+git commit -m "v1.2.0.1"
+git tag v1.2.0.1
 git push origin main
-git push origin v1.2.0.0
+git push origin v1.2.0.1
 ```
 
 The tag push triggers `.github/workflows/release.yml`, which builds and attaches

@@ -76,6 +76,15 @@ public sealed unsafe class StoreExecutor
     private bool _driving;
     private bool _abort;
     private uint _onlySetId;
+    // Snapshot of the Armoire toggle for this run: flipping the checkbox mid-run must not re-route
+    // sets that were planned for the dresser.
+    private bool _useArmoireForRun;
+    // When the dresser momentarily stops answering (async reload right after a deposit).
+    private DateTime _notReadySince = DateTime.MinValue;
+    // Store-loop scan pacing, so a retry cannot rebuild the plan (dresser + bag walk) every frame.
+    private DateTime _nextScanAt = DateTime.MinValue;
+    // True once a one-off "Store this set" has actually been handed to the task manager.
+    private bool _singleStarted;
 
     public StoreExecutor(IPluginLog log, GlamourSortEngine engine)
     {
@@ -90,13 +99,33 @@ public sealed unsafe class StoreExecutor
         });
     }
 
-    private static AgentMiragePrismPrismSetConvert* Agent =>
-        (AgentMiragePrismPrismSetConvert*)Framework.Instance()->UIModule->GetAgentModule()
-            ->GetAgentByInternalId(AgentId.MiragePrismPrismSetConvert);
+    // Logout / zone transitions can leave the UI module temporarily unavailable. Guard the walk
+    // instead of dereferencing a null pointer from a framework-update callback.
+    private static AgentMiragePrismPrismSetConvert* Agent
+    {
+        get
+        {
+            var fw = Framework.Instance();
+            if (fw == null || fw->UIModule == null) return null;
+            var agents = fw->UIModule->GetAgentModule();
+            return agents == null
+                ? null
+                : (AgentMiragePrismPrismSetConvert*)agents->GetAgentByInternalId(AgentId.MiragePrismPrismSetConvert);
+        }
+    }
 
-    private static AgentMiragePrismPrismBox* Dresser =>
-        (AgentMiragePrismPrismBox*)Framework.Instance()->UIModule->GetAgentModule()
-            ->GetAgentByInternalId(AgentId.MiragePrismPrismBox);
+    private static AgentMiragePrismPrismBox* Dresser
+    {
+        get
+        {
+            var fw = Framework.Instance();
+            if (fw == null || fw->UIModule == null) return null;
+            var agents = fw->UIModule->GetAgentModule();
+            return agents == null
+                ? null
+                : (AgentMiragePrismPrismBox*)agents->GetAgentByInternalId(AgentId.MiragePrismPrismBox);
+        }
+    }
 
     private static CSCabinet* Cabinet
     {
@@ -115,9 +144,11 @@ public sealed unsafe class StoreExecutor
         if (Busy) Abort();
 
         UseArmoireForEligibleSets = useArmoireForEligibleSets;
+        _useArmoireForRun = useArmoireForEligibleSets;
         _doneSetIds.Clear();
         _onlySetId = 0;
         _abort = false;
+        _notReadySince = DateTime.MinValue;
         _driving = true;
         Svc.Framework.Update += Drive;
     }
@@ -128,9 +159,12 @@ public sealed unsafe class StoreExecutor
         if (Busy) Abort();
 
         UseArmoireForEligibleSets = useArmoireForEligibleSets;
+        _useArmoireForRun = useArmoireForEligibleSets;
         _doneSetIds.Clear();
         _onlySetId = setItemId;
+        _singleStarted = false;
         _abort = false;
+        _notReadySince = DateTime.MinValue;
         _driving = true;
         Svc.Framework.Update += Drive;
     }
@@ -150,13 +184,35 @@ public sealed unsafe class StoreExecutor
         if (_abort) { StopDriving(); return; }
         if (_tm.IsBusy) return; // a set is mid-store; wait
 
+        // A one-off "Store this set" is done the moment its deposit finishes; do not scan again
+        // and re-queue the same set (a partial outfit would otherwise be stored twice).
+        if (_onlySetId != 0 && _singleStarted)
+        {
+            StopDriving();
+            return;
+        }
+
+        // At most two plan builds a second: the dresser-not-ready retry path would otherwise walk
+        // the 8000-entry dresser list and the bags on every frame for up to 15 seconds.
+        if (DateTime.UtcNow < _nextScanAt) return;
+        _nextScanAt = DateTime.UtcNow.AddMilliseconds(500);
+
         var plan = _engine.BuildPlan();
         if (plan.Error != null)
         {
+            // Right after a deposit the dresser can briefly stop answering while its item list
+            // reloads. Retry for a while; only give up if it stays unavailable.
+            if (_notReadySince == DateTime.MinValue)
+                _notReadySince = DateTime.UtcNow;
+
+            if (plan.ErrorIsTransient && (DateTime.UtcNow - _notReadySince).TotalMilliseconds < 15000)
+                return;
+
             _log.Info($"[GlamourSorter] Stopping: {plan.Error}");
             StopDriving();
             return;
         }
+        _notReadySince = DateTime.MinValue;
 
         // Find the next storable set we haven't already finished this run.
         SetPlan? next = null;
@@ -170,6 +226,30 @@ public sealed unsafe class StoreExecutor
 
         if (next == null)
         {
+            // A one-off "Store this set" whose plan no longer exists (already stored, or its
+            // pieces are gone) must report something, or the window sits on "Storing…" forever.
+            if (_onlySetId != 0 && !_singleStarted)
+            {
+                var missing = new StoreOutcome
+                {
+                    SetName = "Selected set",
+                    Detail = "Not found in a fresh scan — it may already be stored, or no set pieces are in your bags.",
+                };
+                _log.Info($"[GlamourSorter] {missing.Detail}");
+                OnResult?.Invoke(missing);
+            }
+            else if (_onlySetId == 0 && _doneSetIds.Count == 0)
+            {
+                // Start() with nothing storable: report it, so the window does not sit on
+                // "Storing…" with an empty results list.
+                var nothing = new StoreOutcome
+                {
+                    SetName = "Nothing to store",
+                    Detail = "No set pieces were found in a fresh scan — open the Glamour Dresser and scan again.",
+                };
+                _log.Info($"[GlamourSorter] {nothing.Detail}");
+                OnResult?.Invoke(nothing);
+            }
             _log.Info("[GlamourSorter] All sets processed.");
             StopDriving();
             return;
@@ -177,6 +257,8 @@ public sealed unsafe class StoreExecutor
 
         // Mark done up-front so that whether it stores or fails, we don't loop on it.
         _doneSetIds.Add(next.Set.SetItemId);
+        if (_onlySetId != 0)
+            _singleStarted = true;
         EnqueueSet(next);
     }
 
@@ -190,7 +272,7 @@ public sealed unsafe class StoreExecutor
     {
         var outcome = new StoreOutcome { SetName = plan.Set.Name };
 
-        if (plan.Destination == StoreDestination.Armoire && UseArmoireForEligibleSets)
+        if (plan.Destination == StoreDestination.Armoire && _useArmoireForRun)
             EnqueueArmoireSet(plan, outcome);
         else
             EnqueueDresserSet(plan, outcome);
@@ -431,10 +513,14 @@ public sealed unsafe class StoreExecutor
 
         _tm.EnqueueDelay(200);
 
-        // 2. Wait for the main store addon to be ready.
-        _tm.Enqueue(() => GenericHelpers.TryGetAddonMaster<AddonMaster.MiragePrismPrismSetConvert>(AddonMain, out var m)
-                          && m.IsAddonReady,
-            $"Await window: {plan.Set.Name}");
+        // 2. Wait for the main store addon to be ready. A task that inherits the manager's default
+        //    configuration clears the whole queue when it times out — which would discard the
+        //    report task and make the set vanish from the results without a word.
+        _tm.Enqueue(() => !string.IsNullOrEmpty(outcome.Detail)
+                          || (GenericHelpers.TryGetAddonMaster<AddonMaster.MiragePrismPrismSetConvert>(AddonMain, out var m)
+                              && m.IsAddonReady),
+            $"Await window: {plan.Set.Name}",
+            new TaskManagerConfiguration { TimeLimitMS = 10000, AbortOnTimeout = false });
 
         // 3. Fill only the window slots whose item we actually hold. The store window lists
         //    every slot the set defines, but for a partial set we own only some — trying to
@@ -445,6 +531,8 @@ public sealed unsafe class StoreExecutor
         var fillAttempts = new Dictionary<int, int>();
         _tm.Enqueue(() =>
         {
+            if (!string.IsNullOrEmpty(outcome.Detail))
+                return true; // a previous step already decided this set cannot proceed
             if (!GenericHelpers.TryGetAddonMaster<AddonMaster.MiragePrismPrismSetConvert>(AddonMain, out var m)
                 || !m.IsAddonReady)
                 return false;
@@ -499,6 +587,8 @@ public sealed unsafe class StoreExecutor
         // 4. Verify prisms and click Store as Glamour.
         _tm.Enqueue(() =>
         {
+            if (!string.IsNullOrEmpty(outcome.Detail))
+                return true; // fill step gave up (slot unavailable) — nothing to store
             if (!GenericHelpers.TryGetAddonMaster<AddonMaster.MiragePrismPrismSetConvert>(AddonMain, out var m)
                 || !m.IsAddonReady)
                 return false;
@@ -525,9 +615,11 @@ public sealed unsafe class StoreExecutor
             }
 
             _countBeforeStore = CountDresser();
+            _log.Info($"[GlamourSorter] Store {plan.Set.Name}: dresser entries before={_countBeforeStore}.");
             m.StoreAsGlamour();
             return true;
-        }, $"Store: {plan.Set.Name}");
+        }, $"Store: {plan.Set.Name}",
+        new TaskManagerConfiguration { TimeLimitMS = 10000, AbortOnTimeout = false });
 
         _tm.EnqueueDelay(250);
 
@@ -554,6 +646,8 @@ public sealed unsafe class StoreExecutor
         var checkboxClicks = 0;
         _tm.Enqueue(() =>
         {
+            if (!string.IsNullOrEmpty(outcome.Detail))
+                return true; // nothing was stored, so there is no dialog to answer
             if (!GenericHelpers.TryGetAddonMaster<AddonMaster.MiragePrismPrismSetConvertC>(AddonConfirm, out var c)
                 || !c.IsAddonReady)
             {
@@ -563,7 +657,7 @@ public sealed unsafe class StoreExecutor
             }
 
             var checkbox = c.StoreAsOutfitGlamourCheckBox;
-            var hasCheckbox = checkbox != null && checkbox->AtkResNode->IsVisible();
+            var hasCheckbox = checkbox != null && checkbox->AtkResNode != null && checkbox->AtkResNode->IsVisible();
             var yes = c.YesButton;
             var yesEnabled = yes != null && yes->IsEnabled;
             if (confirmStarted == DateTime.MinValue)
@@ -591,7 +685,7 @@ public sealed unsafe class StoreExecutor
                     var yesNow = c.YesButton != null && c.YesButton->IsEnabled;
                     _log.Info($"[GlamourSorter] Checkbox click {plan.Set.Name}: #{checkboxClicks} "
                               + $"eventDelivered={delivered}, checked={checkbox->IsChecked}, "
-                              + $"yesEnabled={yesEnabled}.");
+                              + $"yesEnabled={yesEnabled}->{yesNow}.");
                 }
             }
             else if (yesEnabled)
@@ -646,9 +740,13 @@ public sealed unsafe class StoreExecutor
 
         _tm.EnqueueDelay(300);
 
-        // 7. Verify the deposit really happened by comparing dresser counts. The count only
-        //    updates once the server response lands, so poll briefly instead of declaring
-        //    failure after a single read.
+        // 7. Verify the deposit really happened without depending on a single signal. The dresser
+        //    count only updates once the server response lands, so poll briefly instead of declaring
+        //    failure after one read. Two independent success signals:
+        //      - the dresser's expanded entry list grew (a new outfit and/or newly added pieces), or
+        //      - every planned piece left the bag slot it was scanned in (the deposit consumed it).
+        //    The second is what makes completing an existing outfit verifiable: that deposit adds
+        //    pieces to an entry that already exists and may not change the top-level slot count.
         var verifyStart = DateTime.MinValue;
         _tm.Enqueue(() =>
         {
@@ -656,7 +754,11 @@ public sealed unsafe class StoreExecutor
             if (string.IsNullOrEmpty(outcome.Detail))
             {
                 var after = CountDresser();
-                if (after > _countBeforeStore)
+                var consumed = plan.Pieces.Count > 0
+                               && plan.Pieces.Values.All(piece => !IsPieceStillHeld(piece));
+                var grew = _countBeforeStore >= 0 && after > _countBeforeStore;
+
+                if (grew || consumed)
                 {
                     outcome.Success = true;
                     outcome.Detail = plan.Kind == PlanKind.CompleteExisting
@@ -668,12 +770,16 @@ public sealed unsafe class StoreExecutor
                     if (verifyStart == DateTime.MinValue)
                         verifyStart = DateTime.UtcNow;
 
-                    // after < 0 means the dresser data isn't readable yet — wait for it too.
-                    if (after < 0 || (DateTime.UtcNow - verifyStart).TotalMilliseconds < 4000)
+                    // The count updates when the server response lands, and the dresser data can be
+                    // briefly unreadable while it reloads — give both a few seconds, but never poll
+                    // forever (a timed-out task is discarded, which would swallow the result).
+                    if ((DateTime.UtcNow - verifyStart).TotalMilliseconds < 4000)
                         return false;
 
                     outcome.Success = false;
-                    outcome.Detail = $"No deposit detected (dresser stayed {_countBeforeStore}).";
+                    outcome.Detail = after < 0
+                        ? "Couldn't read the dresser to verify the deposit (did the dresser close?)."
+                        : $"No deposit detected (dresser stayed {_countBeforeStore}, pieces still in bags).";
                 }
             }
             _log.Info($"[GlamourSorter] {outcome.SetName}: {outcome.Detail}");
@@ -684,12 +790,19 @@ public sealed unsafe class StoreExecutor
 
     private int _countBeforeStore;
 
+    // The dresser's PrismBoxItems is an expanded list of 8000 entries (top-level slots first, then
+    // one entry per piece of each stored outfit glamour). Counting only the first 800 entries used to
+    // be "the whole dresser", but once the expanded list holds 800+ entries that count saturates —
+    // every later store then looked like "No deposit detected" even though the deposit had landed.
+    // Data->ItemCount is the game's own count of valid entries in the expanded list.
     private static int CountDresser()
     {
         var d = Dresser;
         if (d == null || d->Data == null) return -1;
+        var limit = (int)Math.Min(d->Data->ItemCount, 8000u);
+        if (limit <= 0) limit = 8000; // counter not populated yet: count the whole list
         var n = 0;
-        for (var i = 0; i < 800; i++)
+        for (var i = 0; i < limit; i++)
             if (d->Data->PrismBoxItems[i].ItemId != 0)
                 n++;
         return n;
