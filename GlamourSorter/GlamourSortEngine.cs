@@ -86,6 +86,17 @@ public sealed class SetPlan
     public readonly HashSet<uint> ModelDuplicateItemIds = new();
 }
 
+// Items stored individually in the dresser that belong to an outfit set — withdrawing them lets the
+// set be stored as one outfit glamour, which frees slots.
+public sealed class LooseSetStorage
+{
+    public uint SetItemId;
+    public string SetName = "";
+    public readonly List<uint> ItemIds = new();
+    public readonly List<int> Slots = new();
+    public bool AlreadyStoredAsOutfit;
+}
+
 public sealed class SortResult
 {
     public readonly List<SetPlan> Plans = new();
@@ -259,6 +270,71 @@ public sealed unsafe class GlamourSortEngine
 
     /// <summary>True when this item id is the item id of a stored outfit (a MirageStoreSetItem row).</summary>
     public bool IsOutfitItem(uint itemId) => _sets.ContainsKey(itemId);
+
+    /// <summary>
+    /// Finds set pieces that the dresser holds as individual items instead of inside an outfit
+    /// glamour. Withdrawing them lets the set be re-stored as one outfit, freeing one dresser slot
+    /// per set (all of its loose pieces leave their individual slots).
+    /// </summary>
+    public List<LooseSetStorage> FindLooseSetPieces()
+    {
+        var found = new Dictionary<uint, LooseSetStorage>();
+        var mgr = MirageManager.Instance();
+        if (mgr == null || !mgr->PrismBoxLoaded)
+            return new List<LooseSetStorage>();
+
+        var ids = mgr->PrismBoxItemIds;
+        var outfitSetIds = new HashSet<uint>();
+
+        for (var i = 0; i < ids.Length; i++)
+        {
+            var raw = ids[i];
+            if (raw == 0) continue;
+            var itemId = raw % 1_000_000u; // strip HQ marker
+            if (IsOutfitItem(itemId))
+                outfitSetIds.Add(itemId);
+        }
+
+        for (var i = 0; i < ids.Length; i++)
+        {
+            var raw = ids[i];
+            if (raw == 0) continue;
+            var itemId = raw % 1_000_000u;
+            if (IsOutfitItem(itemId))
+                continue;
+            if (!_itemToSets.TryGetValue(itemId, out var setIds))
+                continue;
+
+            foreach (var setId in setIds)
+            {
+                if (!found.TryGetValue(setId, out var entry))
+                {
+                    entry = new LooseSetStorage
+                    {
+                        SetItemId = setId,
+                        SetName = _sets.TryGetValue(setId, out var set) ? set.Name : $"Set {setId}",
+                    };
+                    found[setId] = entry;
+                }
+
+                entry.Slots.Add(i);
+                if (!entry.ItemIds.Contains(itemId))
+                    entry.ItemIds.Add(itemId);
+            }
+        }
+
+        var candidates = new List<LooseSetStorage>();
+        foreach (var entry in found.Values)
+        {
+            if (entry.Slots.Count < 2)
+                continue; // one loose piece cannot free anything by itself
+            entry.AlreadyStoredAsOutfit = outfitSetIds.Contains(entry.SetItemId);
+            candidates.Add(entry);
+        }
+
+        candidates.Sort((a, b) => b.Slots.Count.CompareTo(a.Slots.Count));
+        return candidates;
+    }
 
     /// <summary>True when the dresser can store this item on its own.</summary>
     public bool IsDresserStorable(uint itemId) => _glamorousItemIds.Contains(itemId);

@@ -40,6 +40,19 @@ public sealed class MainWindow : ShellWindow
         _extractor.OnChanged = () =>
         {
             _plan = _plan is { Error: null } ? _engine.BuildPlan() : null;
+
+            // "Withdraw set pieces" is the first half of consolidating loose pieces into outfits; the
+            // second half is a normal store run, which re-scans and finds those sets as plans.
+            if (_extractor.ConsolidationRequested)
+            {
+                _extractor.ConsolidationRequested = false;
+                ResetCounters();
+                _log.Clear();
+                _plan = null;
+                _executor.Start(_executor.UseArmoireForEligibleSets);
+                _status = "Set pieces withdrawn — storing them as outfit glamours…";
+                _tab = 0;
+            }
         };
         _executor.OnResult = o =>
         {

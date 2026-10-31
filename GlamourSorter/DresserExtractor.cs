@@ -39,6 +39,7 @@ public sealed unsafe class DresserExtractor
         Duplicates,
         AllSingles,
         Category,
+        Consolidate,
     }
 
     private sealed class DresserStack
@@ -66,6 +67,10 @@ public sealed unsafe class DresserExtractor
 
     private readonly List<DresserStack> _stacks = new();
     private readonly Dictionary<uint, DresserStack> _byItem = new();
+    // Set pieces the dresser holds as individual items; withdrawing them lets Store All pack each
+    // set into a single outfit glamour and free slots.
+    private readonly List<LooseSetStorage> _looseSetSets = new();
+    private readonly List<int> _looseSetSlots = new();
     // Slot -> base item id from the last snapshot, so a withdraw can prove it is still aiming at
     // the item it planned to withdraw (the dresser can re-order its list between snapshots).
     private readonly Dictionary<int, uint> _slotItem = new();
@@ -123,6 +128,12 @@ public sealed unsafe class DresserExtractor
     /// <summary>True while a withdraw run is in progress.</summary>
     public bool Busy => _running;
 
+    /// <summary>
+    /// Set when the last/current run was started from the "withdraw set pieces" action; the main
+    /// window then follows it with a store run that packs the pieces into outfits.
+    /// </summary>
+    public bool ConsolidationRequested { get; set; }
+
     /// <summary>Raised after a run actually changed the dresser, so the main window can re-scan.</summary>
     public Action? OnChanged;
 
@@ -130,6 +141,7 @@ public sealed unsafe class DresserExtractor
     {
         if (!_running) return;
 
+        ConsolidationRequested = false;
         _tm.Abort();
         FinishRun($"Withdraw cancelled after {_runDone} of {_runTotal} item(s).");
     }
@@ -240,6 +252,28 @@ public sealed unsafe class DresserExtractor
         _readySummary = _loaded
             ? $"{_looseCount} loose item(s) in {_stacks.Count} stack(s); {_outfitCount} outfit glamour(s) are left alone."
             : "";
+
+        RebuildLooseSetCandidates();
+    }
+
+    private void RebuildLooseSetCandidates()
+    {
+        _looseSetSets.Clear();
+        _looseSetSlots.Clear();
+        if (!_loaded)
+            return;
+
+        var candidates = _engine.FindLooseSetPieces();
+        if (candidates.Count == 0)
+            return;
+
+        _looseSetSets.AddRange(candidates);
+        var slots = new HashSet<int>();
+        foreach (var candidate in candidates)
+            foreach (var slot in candidate.Slots)
+                slots.Add(slot);
+        _looseSetSlots.AddRange(slots);
+        _looseSetSlots.Sort();
     }
 
     private static int CompareStacks(DresserStack a, DresserStack b)
@@ -267,14 +301,14 @@ public sealed unsafe class DresserExtractor
     // Withdraw run
     // -------------------------------------------------------------------------------------------
 
-    private void StartRun(List<int> slots)
+    private bool StartRun(List<int> slots)
     {
-        if (_running) return;
+        if (_running) return false;
 
         if (slots.Count == 0)
         {
             SetResult("Nothing to withdraw.");
-            return;
+            return false;
         }
 
         var mgr = MirageManager.Instance();
@@ -282,19 +316,19 @@ public sealed unsafe class DresserExtractor
         {
             SetResult("Dresser data is not loaded. Open the Glamour Dresser once, then try again.");
             _snapshotDirty = true;
-            return;
+            return false;
         }
 
         var empty = EmptyBagSlots();
         if (empty <= 0)
         {
             SetResult("Your bags are full — free at least one slot before withdrawing.");
-            return;
+            return false;
         }
         if (slots.Count > empty)
         {
             SetResult($"Not enough free bag slots: {slots.Count} item(s) to withdraw, {empty} free.");
-            return;
+            return false;
         }
 
         Disarm();
@@ -322,6 +356,7 @@ public sealed unsafe class DresserExtractor
             AbortOnTimeout = false,
             ShowError = false,
         });
+        return true;
     }
 
     // One task drives the whole run so the queue stays bounded: send, wait for the server response
@@ -448,6 +483,8 @@ public sealed unsafe class DresserExtractor
     private void FinishRun(string message)
     {
         var changed = _runDone > 0;
+        if (!changed)
+            ConsolidationRequested = false; // nothing moved, so there is nothing to pack into outfits
 
         _running = false;
         _awaitingClear = false;
@@ -472,6 +509,9 @@ public sealed unsafe class DresserExtractor
 
     private List<int> BuildSlots(Armed action)
     {
+        if (action == Armed.Consolidate)
+            return new List<int>(_looseSetSlots);
+
         var slots = new List<int>();
         var category = SelectedCategoryName;
 
@@ -491,7 +531,8 @@ public sealed unsafe class DresserExtractor
     private void Execute(Armed action)
     {
         if (action == Armed.None) return;
-        StartRun(BuildSlots(action));
+        var started = StartRun(BuildSlots(action));
+        ConsolidationRequested = started && action == Armed.Consolidate;
     }
 
     // -------------------------------------------------------------------------------------------
@@ -521,6 +562,7 @@ public sealed unsafe class DresserExtractor
 
         DrawStatusCard();
         DrawToolbar();
+        DrawConsolidationBlock();
 
         if (_loaded && _stacks.Count > 0)
         {
@@ -533,6 +575,37 @@ public sealed unsafe class DresserExtractor
         // Any click that was not the arming click cancels a pending confirmation.
         if (_armed != Armed.None && !_armedThisFrame && ImGui.IsMouseClicked(ImGuiMouseButton.Left))
             Disarm();
+    }
+
+    private void DrawConsolidationBlock()
+    {
+        UiKit.Section(FontAwesomeIcon.LayerGroup, "set pieces stored loose");
+        if (_looseSetSlots.Count == 0)
+        {
+            ImGui.TextColored(Theme.Muted, "No outfit set is stored as individual pieces — nothing to pack.");
+            ImGui.Dummy(new Vector2(0f, Theme.Gap));
+            return;
+        }
+
+        var alreadyOutfits = 0;
+        foreach (var set in _looseSetSets)
+            if (set.AlreadyStoredAsOutfit) alreadyOutfits++;
+        var freed = Math.Max(0, _looseSetSlots.Count - (_looseSetSets.Count - alreadyOutfits));
+
+        ImGui.PushTextWrapPos(ImGui.GetCursorPosX() + ImGui.GetContentRegionAvail().X);
+        ImGui.TextColored(Theme.Muted,
+            $"{_looseSetSlots.Count} piece(s) from {_looseSetSets.Count} outfit set(s) are stored individually. "
+            + $"Withdrawing them lets Store All pack each set into one outfit glamour — about {freed} dresser slot(s) freed.");
+        ImGui.PopTextWrapPos();
+        ImGui.Dummy(new Vector2(0f, Theme.Gap));
+
+        var can = !_running && _looseSetSlots.Count > 0;
+        if (!can) ImGui.BeginDisabled();
+        var label = _armed == Armed.Consolidate ? _armedConfirm : "Withdraw set pieces";
+        if (UiKit.GradientButton("##extract_consolidate", label, Theme.SurfaceAlt, Theme.Accent, 34f))
+            OnPrimaryButton(Armed.Consolidate, _looseSetSlots.Count);
+        if (!can) ImGui.EndDisabled();
+        ImGui.Dummy(new Vector2(0f, Theme.Gap));
     }
 
     private void DrawToolbar()

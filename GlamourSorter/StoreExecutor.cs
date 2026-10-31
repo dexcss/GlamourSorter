@@ -63,6 +63,8 @@ public sealed unsafe class StoreExecutor
     private const int CommandStorePrismBoxItem = 2351;
     // Glamour Prism item id; every stored piece costs one.
     private const uint GlamourPrismItemId = 21800;
+    // The dresser holds 800 slots; a full dresser rejects every store that would need a new slot.
+    private const int DresserCapacity = 800;
 
     private readonly IPluginLog _log;
     private readonly TaskManager _tm;
@@ -297,6 +299,22 @@ public sealed unsafe class StoreExecutor
                 OnResult?.Invoke(nothing);
             }
             _log.Info("[GlamourSorter] All sets processed.");
+            StopDriving();
+            return;
+        }
+
+        // A full dresser refuses anything that needs a new slot; say so once instead of failing every
+        // remaining item with "no deposit detected". Completing an existing outfit needs no slot.
+        if (next.Kind != PlanKind.CompleteExisting && CountDresser() >= DresserCapacity)
+        {
+            var full = new StoreOutcome
+            {
+                SetName = "Glamour Dresser full",
+                Detail = $"The Glamour Dresser is full ({DresserCapacity}/{DresserCapacity}). "
+                         + "Withdraw something on the Withdraw tab (or consolidate loose set pieces), then store again.",
+            };
+            _log.Info($"[GlamourSorter] {full.Detail}");
+            OnResult?.Invoke(full);
             StopDriving();
             return;
         }
@@ -563,6 +581,13 @@ public sealed unsafe class StoreExecutor
             if (!IsPieceStillHeld(piece))
             {
                 outcome.Detail = "The item is no longer in the bag slot that was scanned.";
+                Report();
+                return true;
+            }
+
+            if (CountDresser() >= DresserCapacity)
+            {
+                outcome.Detail = $"The Glamour Dresser is full ({DresserCapacity}/{DresserCapacity}). Free a slot first.";
                 Report();
                 return true;
             }
