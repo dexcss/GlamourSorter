@@ -694,14 +694,20 @@ public sealed unsafe class StoreExecutor
         // The outfit window only accepts hand-ins of one quality ("Only items of the same quality may
         // be selected"), and a mixed selection makes the game silently refuse the store. Anchor on
         // the quality we hold most of and hand in only pieces of that quality.
+        // Only NQ pieces are handed in: every HQ hand-in ended with the store window refusing the
+        // combination silently (live logs 2026-10-31 21:15-21:30), while every NQ hand-in stored.
         var nqPieces = plan.Pieces.Values.Where(piece => !piece.Hq).ToList();
-        var hqPieces = plan.Pieces.Values.Where(piece => piece.Hq).ToList();
-        var anchorPiece = nqPieces.Count > 0 && nqPieces.Count >= hqPieces.Count
-            ? nqPieces[0]
-            : hqPieces.Count > 0 ? hqPieces[0] : plan.Pieces.Values.FirstOrDefault();
-        var anchorHq = anchorPiece.Hq;
-        var matchingQualityItemIds = new HashSet<uint>(
-            plan.Pieces.Values.Where(piece => piece.Hq == anchorHq).Select(piece => piece.ItemId));
+        var anchorPiece = nqPieces.Count > 0 ? nqPieces[0] : plan.Pieces.Values.FirstOrDefault();
+        var matchingQualityItemIds = new HashSet<uint>(nqPieces.Select(piece => piece.ItemId));
+
+        if (nqPieces.Count == 0 && plan.Pieces.Count > 0)
+        {
+            outcome.Success = false;
+            outcome.Detail = "Only HQ piece(s) — the dresser will not take HQ gear as an outfit glamour "
+                             + "(left for manual review).";
+            _log.Info($"[GlamourSorter] {outcome.SetName}: {outcome.Detail}");
+            return;
+        }
 
         // 1. Open the store window for this set.
         //    Open() must be anchored on a REAL inventory piece belonging to the set — its
@@ -813,8 +819,8 @@ public sealed unsafe class StoreExecutor
                     if (!handedPieces.Contains(piece.ItemId) && !matchingQualityItemIds.Contains(piece.ItemId))
                         qualitySkipped++;
                 if (qualitySkipped > 0)
-                    _log.Info($"[GlamourSorter] {plan.Set.Name}: skipped {qualitySkipped} piece(s) of a different "
-                              + $"quality (outfit quality {(anchorHq ? "HQ" : "NQ")}).");
+                    _log.Info($"[GlamourSorter] {plan.Set.Name}: skipped {qualitySkipped} HQ piece(s) "
+                              + "(outfit glamours are built from NQ pieces).");
 
                 // Distinguish "everything we own is already inside the outfit" from "we handed in
                 // everything we could" — the first needs no store attempt at all.
@@ -957,7 +963,10 @@ public sealed unsafe class StoreExecutor
                 for (var i = 0; i < m.Items.Length && i < 11; i++)
                 {
                     _log.Info($"[GlamourSorter]   slot {i}: item {m.Items[i].ItemId} "
-                              + $"invType={m.Items[i].InventoryType} flag={m.Items[i].Flag}");
+                              + $"invType={m.Items[i].InventoryType} flag={m.Items[i].Flag}"
+                              + (plan.Pieces.TryGetValue((SetSlot)i, out var planPiece)
+                                  ? $" plan={(planPiece.Hq ? "HQ" : "NQ")}"
+                                  : ""));
                 }
             }
 
