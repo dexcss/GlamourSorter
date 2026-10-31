@@ -2,7 +2,7 @@
   "Author": "dexcss",
   "Name": "Glamour Sorter",
   "InternalName": "GlamourSorter",
-  "AssemblyVersion": "1.3.0.16",
+  "AssemblyVersion": "1.3.0.17",
   "Description": "Sorts glamour-able gear from your inventory into the Glamour Dresser — outfit sets as outfit glamours (including seasonal sets, with the Store as Outfit Glamour checkbox dialog automated) and loose items one by one — skipping anything already stored. Includes an extractor that withdraws dresser items back to your bags: all loose items, duplicates only, or one item type such as all rings. Open your Glamour Dresser, run /gsort, review the preview, then store.",
   "ApplicableVersion": "any",
   "RepoUrl": "https://github.com/dexcss/GlamourSorter",

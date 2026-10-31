@@ -48,6 +48,7 @@ public sealed class Plugin : IDalamudPlugin
     {
         // Stop the framework-driven loops before ECommons tears down its services.
         _executor.Abort();
+        _executor.Dispose();
         _extractor.Abort();
         Svc.PluginInterface.UiBuilder.Draw -= _windowSystem.Draw;
         Svc.PluginInterface.UiBuilder.OpenMainUi -= OpenMainUi;

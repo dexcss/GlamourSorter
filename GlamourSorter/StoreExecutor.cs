@@ -102,6 +102,9 @@ public sealed unsafe class StoreExecutor
     {
         _log = log;
         _engine = engine;
+        // The game prints the real refusal reason (quality/condition/limits) in chat; keep the recent
+        // lines so a failed store can report exactly what it said instead of guessing.
+        Svc.Chat.ChatMessage += OnGameChat;
 
         _tm = new TaskManager(new TaskManagerConfiguration
         {
@@ -109,6 +112,40 @@ public sealed unsafe class StoreExecutor
             TimeLimitMS = 15000,
             ShowError = false,
         });
+    }
+
+    private readonly List<string> _gameChat = new();
+    private int _chatMark;
+
+    public void Dispose() => Svc.Chat.ChatMessage -= OnGameChat;
+
+    private void OnGameChat(Dalamud.Game.Chat.IHandleableChatMessage message)
+    {
+        try
+        {
+            var text = message.Message.TextValue;
+            if (string.IsNullOrEmpty(text))
+                return;
+            lock (_gameChat)
+            {
+                _gameChat.Add(text);
+                if (_gameChat.Count > 200)
+                    _gameChat.RemoveAt(0);
+            }
+        }
+        catch
+        {
+            // Chat capture is diagnostics only — never let it break a run.
+        }
+    }
+
+    private void LogGameChatSinceMark()
+    {
+        lock (_gameChat)
+        {
+            for (var i = Math.Max(0, _chatMark); i < _gameChat.Count; i++)
+                _log.Info($"[GlamourSorter]   game said: {_gameChat[i]}");
+        }
     }
 
     // Logout / zone transitions can leave the UI module temporarily unavailable. Guard the walk
@@ -925,6 +962,8 @@ public sealed unsafe class StoreExecutor
             }
 
             _countBeforeStore = CountDresser();
+            lock (_gameChat)
+                _chatMark = _gameChat.Count;
             _log.Info($"[GlamourSorter] Store {plan.Set.Name}: dresser entries before={_countBeforeStore}.");
             m.StoreAsGlamour();
             _log.Info($"[GlamourSorter] Store {plan.Set.Name}: clicked Store as Glamour.");
@@ -1126,7 +1165,10 @@ public sealed unsafe class StoreExecutor
                     outcome.Success = false;
                     outcome.Detail = after < 0
                         ? "Couldn't read the dresser to verify the deposit (did the dresser close?)."
-                        : $"No deposit detected (dresser stayed {_countBeforeStore}, pieces still in bags).";
+                        : $"The game did not accept this outfit (left for manual review).";
+                    _log.Info($"[GlamourSorter] {outcome.SetName}: dresser stayed {_countBeforeStore}, "
+                              + $"pieces still held; messages the game printed meanwhile:");
+                    LogGameChatSinceMark();
                 }
             }
             _log.Info($"[GlamourSorter] {outcome.SetName}: {outcome.Detail}");
