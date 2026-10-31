@@ -136,6 +136,40 @@ public sealed unsafe class StoreExecutor
         }
     }
 
+    // The dresser answers "An outfit glamour matching this gear is available. Add to pre-existing
+    // outfit glamour?" through the generic SelectYesno addon — sometimes before the store window
+    // opens, sometimes after the store click. Yes is callback 0 (the same call YesAlready uses for
+    // SelectYesno). Without answering it the flow stalls with the prompt on screen.
+    private bool TryAnswerDresserPrompt()
+    {
+        var addon = Svc.GameGui.GetAddonByName("SelectYesno", 1);
+        if (addon.Address == IntPtr.Zero)
+            return false;
+
+        var unit = (AtkUnitBase*)addon.Address;
+        if (unit == null || !unit->IsReady || !unit->IsVisible)
+            return false;
+
+        if (!EzThrottler.Throttle("gsort_selectyesno", 750))
+            return true;
+
+        Callback.Fire(unit, true, 0);
+        _log.Info("[GlamourSorter] Answered the dresser's Yes/No prompt with Yes (add to pre-existing outfit glamour).");
+        return true;
+    }
+
+    // Between sets, a store window left open (e.g. after a give-up path) would block the next one.
+    private bool TryCloseLeftoverStoreWindow()
+    {
+        if (!GenericHelpers.TryGetAddonMaster<AddonMaster.MiragePrismPrismSetConvert>(AddonMain, out var m)
+            || !m.IsAddonReady)
+            return false;
+
+        m.Close();
+        _log.Info("[GlamourSorter] Closed a leftover store window.");
+        return true;
+    }
+
     // Entry point. Instead of queuing every set from one stale scan (storing consumes items
     // and invalidates the rest of the plan), we drive ONE set at a time and RE-SCAN between
     // each, so every set is attempted from fresh inventory/dresser state.
@@ -196,6 +230,12 @@ public sealed unsafe class StoreExecutor
         // the 8000-entry dresser list and the bags on every frame for up to 15 seconds.
         if (DateTime.UtcNow < _nextScanAt) return;
         _nextScanAt = DateTime.UtcNow.AddMilliseconds(500);
+
+        // A prompt or store window left open by a previous set would block the next window.
+        if (TryAnswerDresserPrompt())
+            return;
+        if (TryCloseLeftoverStoreWindow())
+            return;
 
         var plan = _engine.BuildPlan();
         if (plan.Error != null)
@@ -509,18 +549,37 @@ public sealed unsafe class StoreExecutor
             // enableStoring: true = store flow (not preview).
             agent->Open(anchor.ItemId, anchor.Container, anchor.Slot, 0, 0, true);
             return true;
-        }, $"Open store window: {plan.Set.Name}");
+        }, $"Open store window: {plan.Set.Name}",
+        new TaskManagerConfiguration { TimeLimitMS = 5000, AbortOnTimeout = false });
 
         _tm.EnqueueDelay(200);
 
         // 2. Wait for the main store addon to be ready. A task that inherits the manager's default
         //    configuration clears the whole queue when it times out — which would discard the
         //    report task and make the set vanish from the results without a word.
-        _tm.Enqueue(() => !string.IsNullOrEmpty(outcome.Detail)
-                          || (GenericHelpers.TryGetAddonMaster<AddonMaster.MiragePrismPrismSetConvert>(AddonMain, out var m)
-                              && m.IsAddonReady),
+        var openWaitStart = DateTime.MinValue;
+        _tm.Enqueue(() =>
+            {
+                if (!string.IsNullOrEmpty(outcome.Detail))
+                    return true;
+                if (TryAnswerDresserPrompt())
+                    return false; // "add to pre-existing outfit glamour?" — answer, then wait for the window
+                if (GenericHelpers.TryGetAddonMaster<AddonMaster.MiragePrismPrismSetConvert>(AddonMain, out var m)
+                    && m.IsAddonReady)
+                    return true;
+
+                if (openWaitStart == DateTime.MinValue)
+                    openWaitStart = DateTime.UtcNow;
+                if ((DateTime.UtcNow - openWaitStart).TotalMilliseconds > 10000)
+                {
+                    outcome.Detail = "The store window did not open (left for manual review).";
+                    _log.Warning($"[GlamourSorter] {outcome.SetName}: {outcome.Detail}");
+                    return true;
+                }
+                return false;
+            },
             $"Await window: {plan.Set.Name}",
-            new TaskManagerConfiguration { TimeLimitMS = 10000, AbortOnTimeout = false });
+            new TaskManagerConfiguration { TimeLimitMS = 15000, AbortOnTimeout = false });
 
         // 3. Fill only the window slots whose item we actually hold. The store window lists
         //    every slot the set defines, but for a partial set we own only some — trying to
@@ -533,6 +592,8 @@ public sealed unsafe class StoreExecutor
         {
             if (!string.IsNullOrEmpty(outcome.Detail))
                 return true; // a previous step already decided this set cannot proceed
+            if (TryAnswerDresserPrompt())
+                return false;
             if (!GenericHelpers.TryGetAddonMaster<AddonMaster.MiragePrismPrismSetConvert>(AddonMain, out var m)
                 || !m.IsAddonReady)
                 return false;
@@ -589,6 +650,8 @@ public sealed unsafe class StoreExecutor
         {
             if (!string.IsNullOrEmpty(outcome.Detail))
                 return true; // fill step gave up (slot unavailable) — nothing to store
+            if (TryAnswerDresserPrompt())
+                return false;
             if (!GenericHelpers.TryGetAddonMaster<AddonMaster.MiragePrismPrismSetConvert>(AddonMain, out var m)
                 || !m.IsAddonReady)
                 return false;
@@ -610,6 +673,12 @@ public sealed unsafe class StoreExecutor
             {
                 outcome.Detail = "Store button not enabled (nothing storable).";
                 _log.Warning($"[GlamourSorter] {outcome.SetName}: {outcome.Detail}");
+                // Diagnostic detail: which hand-in slots the window actually offered.
+                for (var i = 0; i < m.Items.Length; i++)
+                {
+                    _log.Info($"[GlamourSorter]   hand-in slot {i}: item {m.Items[i].ItemId} "
+                              + $"inventoryType={m.Items[i].InventoryType} flag={m.Items[i].Flag}");
+                }
                 m.Close();
                 return true;
             }
@@ -641,6 +710,7 @@ public sealed unsafe class StoreExecutor
         //      d) When Yes is finally enabled, event 2 deposits (proven live with a real
         //         checkbox tick + automated Yes).
         var confirmStarted = DateTime.MinValue;
+        var confirmWaitStart = DateTime.MinValue;
         var confirmAttempts = 0;
         var zeroFired = false;
         var checkboxClicks = 0;
@@ -648,12 +718,28 @@ public sealed unsafe class StoreExecutor
         {
             if (!string.IsNullOrEmpty(outcome.Detail))
                 return true; // nothing was stored, so there is no dialog to answer
+            if (TryAnswerDresserPrompt())
+                return false; // answered the pre-existing-outfit prompt; the store window follows
             if (!GenericHelpers.TryGetAddonMaster<AddonMaster.MiragePrismPrismSetConvertC>(AddonConfirm, out var c)
                 || !c.IsAddonReady)
             {
                 var mainOpen = GenericHelpers.TryGetAddonMaster<AddonMaster.MiragePrismPrismSetConvert>(AddonMain, out var m2)
                                && m2.IsAddonReady;
-                return !mainOpen;
+                if (!mainOpen)
+                    return true;
+
+                // Watchdog: a store window that never produces its confirm dialog (the game rejected
+                // the hand-in silently) must not swallow the rest of the run.
+                if (confirmWaitStart == DateTime.MinValue)
+                    confirmWaitStart = DateTime.UtcNow;
+                if ((DateTime.UtcNow - confirmWaitStart).TotalMilliseconds > 10000)
+                {
+                    outcome.Detail = "The store window never produced a confirmation (left for manual review).";
+                    _log.Warning($"[GlamourSorter] {outcome.SetName}: {outcome.Detail}");
+                    TryCloseLeftoverStoreWindow();
+                    return true;
+                }
+                return false;
             }
 
             var checkbox = c.StoreAsOutfitGlamourCheckBox;

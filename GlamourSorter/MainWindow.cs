@@ -134,8 +134,9 @@ public sealed class MainWindow : ShellWindow
         if (busy) ImGui.BeginDisabled();
         if (UiKit.GradientButton("##scan", "Scan", Theme.SurfaceAlt, Theme.Accent, 38f))
             DoScan();
+        if (busy) ImGui.EndDisabled();
 
-        if (!canStoreAll) ImGui.BeginDisabled();
+        if (busy || !canStoreAll) ImGui.BeginDisabled();
         if (UiKit.GradientButton("##storeall", "Store All Below", Theme.Accent, Theme.Good, 38f))
         {
             ResetCounters();
@@ -146,8 +147,9 @@ public sealed class MainWindow : ShellWindow
             _executor.Start(_executor.UseArmoireForEligibleSets);
             _status = "Storing… it re-scans between each set.";
         }
-        if (!canStoreAll) ImGui.EndDisabled();
+        if (busy || !canStoreAll) ImGui.EndDisabled();
 
+        // Abort stays clickable while something is running — otherwise a stuck set cannot be stopped.
         if (busy)
         {
             if (UiKit.ChipButton("##abort", "Abort", false, ImGui.GetContentRegionAvail().X))
@@ -164,7 +166,6 @@ public sealed class MainWindow : ShellWindow
                 }
             }
         }
-        if (busy) ImGui.EndDisabled();
 
         ImGui.Dummy(new Vector2(0f, Theme.Gap));
     }

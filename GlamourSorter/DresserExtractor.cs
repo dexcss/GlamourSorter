@@ -5,8 +5,10 @@ using System.Numerics;
 using Dalamud.Bindings.ImGui;
 using Dalamud.Interface;
 using Dalamud.Plugin.Services;
+using ECommons.DalamudServices;
 using FFXIVClientStructs.FFXIV.Client.Game;
 using GlamourSorter.FancyUI;
+using LuminaItem = Lumina.Excel.Sheets.Item;
 using TaskManager = ECommons.Automation.NeoTaskManager.TaskManager;
 using TaskManagerConfiguration = ECommons.Automation.NeoTaskManager.TaskManagerConfiguration;
 
@@ -23,7 +25,7 @@ public sealed unsafe class DresserExtractor
 {
     // Pace between the server sends; the game tolerates a call per ~200 ms and the response to the
     // previous slot is awaited before the next send anyway.
-    private const int WithdrawPaceMs = 200;
+    private const int WithdrawPaceMs = 400;
     // A successful RestorePrismBoxItem zeroes the slot once the server responds; the dresser also
     // briefly reloads its list afterwards, so allow both without waiting forever.
     private const int ClearTimeoutMs = 3000;
@@ -93,6 +95,8 @@ public sealed unsafe class DresserExtractor
     private bool _running;
     private bool _awaitingClear;
     private uint _awaitExpected;
+    private int _sendRefusals;
+    private DateTime _requestedSince;
     private int _runIndex;
     private int _runDone;
     private int _runTotal;
@@ -304,6 +308,8 @@ public sealed unsafe class DresserExtractor
         _runDone = 0;
         _runTotal = _runSlots.Count;
         _awaitingClear = false;
+        _sendRefusals = 0;
+        _requestedSince = DateTime.MinValue;
         _lastSendAt = DateTime.MinValue;
         _awaitStart = DateTime.MinValue;
         _unloadedSince = DateTime.MinValue;
@@ -366,6 +372,10 @@ public sealed unsafe class DresserExtractor
             {
                 _awaitingClear = false;
                 _runDone++;
+                _sendRefusals = 0;
+                // Pace from the clear, not the send: a fast clear used to let the next send fire
+                // while the client was still settling the previous restore.
+                _lastSendAt = DateTime.UtcNow;
                 _snapshotDirty = true;
                 _progress = $"Withdrawing {_runDone} of {_runTotal}…";
                 return false;
@@ -396,16 +406,57 @@ public sealed unsafe class DresserExtractor
             return true;
         }
 
+        // The client asks the server for a fresh dresser list around each withdrawal; a send while
+        // that request is in flight is refused, so wait for it to settle (with a watchdog).
+        if (mgr->PrismBoxRequested)
+        {
+            if (_requestedSince == DateTime.MinValue)
+                _requestedSince = DateTime.UtcNow;
+            if ((DateTime.UtcNow - _requestedSince).TotalMilliseconds > 5000)
+            {
+                FinishRun($"Stopped after {_runDone} of {_runTotal}: the dresser data stayed busy.");
+                return true;
+            }
+            _lastSendAt = DateTime.UtcNow;
+            return false;
+        }
+        _requestedSince = DateTime.MinValue;
+
         if ((DateTime.UtcNow - _lastSendAt).TotalMilliseconds < WithdrawPaceMs)
             return false;
 
         _lastSendAt = DateTime.UtcNow;
         if (!mgr->RestorePrismBoxItem((uint)slot))
         {
-            FinishRun($"Stopped after {_runDone} of {_runTotal}: the withdraw was refused — bags full, or you already hold a unique copy of that item.");
-            return true;
+            _sendRefusals++;
+            var itemName = ItemDisplay.Name(expected);
+            var unique = IsUniqueItem(expected);
+            _log.Info($"[GlamourSorter] Dresser extractor: withdraw refused for {itemName} ({expected}), "
+                      + $"unique={unique}, attempt={_sendRefusals}, freeBagSlots={EmptyBagSlots()}.");
+
+            // A unique item cannot be withdrawn while you already hold a copy of it. That is per
+            // item, not a run-wide failure: skip the rest of this item's copies and keep going.
+            if (unique && _sendRefusals >= 2)
+            {
+                SkipRemainingCopies(expected);
+                _sendRefusals = 0;
+                _lastSendAt = DateTime.UtcNow;
+                return false;
+            }
+
+            // Transient refusals (the previous restore still settling) are retried; a repeat
+            // failure stops the run with the item named.
+            if (_sendRefusals >= 5)
+            {
+                FinishRun($"Stopped after {_runDone} of {_runTotal}: {itemName} was refused 5 times — bags full, or you already hold a copy.");
+                return true;
+            }
+
+            _lastSendAt = DateTime.UtcNow; // pace the retry
+            return false;
         }
 
+        _sendRefusals = 0;
         _awaitingClear = true;
         _awaitExpected = expected;
         _awaitStart = _lastSendAt;
@@ -419,6 +470,8 @@ public sealed unsafe class DresserExtractor
         _running = false;
         _awaitingClear = false;
         _unloadedSince = DateTime.MinValue;
+        _requestedSince = DateTime.MinValue;
+        _sendRefusals = 0;
         _lastSendAt = DateTime.MinValue;
         _runSlots.Clear();
         Disarm();
@@ -773,6 +826,41 @@ public sealed unsafe class DresserExtractor
             ImGui.SetTooltip(stack.Name);
 
         ImGui.SetCursorScreenPos(rowTop + new Vector2(0f, rowH + 4f * s));
+    }
+
+    private static bool IsUniqueItem(uint itemId)
+    {
+        try
+        {
+            var row = Svc.Data.GetExcelSheet<LuminaItem>()?.GetRowOrDefault(itemId);
+            return row?.IsUnique ?? false;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    // Drop the remaining planned copies of one item id — used when the game refuses them because
+    // the item is unique and the player now holds one.
+    private void SkipRemainingCopies(uint itemId)
+    {
+        var skipped = 0;
+        for (var i = _runSlots.Count - 1; i >= _runIndex; i--)
+        {
+            if (_runExpected[i] != itemId)
+                continue;
+            _runSlots.RemoveAt(i);
+            _runExpected.RemoveAt(i);
+            skipped++;
+        }
+
+        if (skipped == 0)
+            return;
+
+        _log.Info($"[GlamourSorter] Dresser extractor: skipped {skipped} more cop{(skipped == 1 ? "y" : "ies")} of {ItemDisplay.Name(itemId)} (unique item — you already hold one).");
+        _runTotal = Math.Max(_runDone, _runTotal - skipped);
+        _progress = $"Withdrawing {_runDone} of {_runTotal}…";
     }
 
     private void WithdrawStack(DresserStack stack, bool keepFirst)
