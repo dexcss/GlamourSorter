@@ -387,6 +387,31 @@ public sealed unsafe class GlamourSortEngine
         return true;
     }
 
+    // Every item id saved in a gear set. IsItemRegisteredToGearset is the game's own icon-mark check
+    // and is preferred, but it was observed under-reporting right after a plugin load (one scan saw
+    // 1 protected piece, the next saw 110), so the gearset entries themselves are read as a belt-
+    // and-braces second source. Storing a piece that is in a gear set would pull it out of the set.
+    private static HashSet<uint> BuildGearsetItemIds(RaptureGearsetModule* gsm)
+    {
+        var ids = new HashSet<uint>();
+        if (gsm == null) return ids;
+
+        for (var i = 0; i < 100; i++)
+        {
+            var entry = gsm->GetGearset(i);
+            if (entry == null || (entry->Flags & RaptureGearsetModule.GearsetFlag.Exists) == 0)
+                continue;
+
+            foreach (var item in entry->Items)
+            {
+                if (item.ItemId == 0) continue;
+                ids.Add(item.ItemId % 1_000_000u);
+            }
+        }
+
+        return ids;
+    }
+
     // Scan the player's bags + armoury for glamour-able gear. Set pieces and loose single items
     // are separated: set pieces feed the outfit flows, loose items are stored one-by-one.
     // Pieces registered to a saved gear set are separated out first: storing one would pull it
@@ -401,6 +426,7 @@ public sealed unsafe class GlamourSortEngine
         if (inv == null) return (held, gearset, singles);
 
         var gsm = RaptureGearsetModule.Instance();
+        var gearsetItemIds = BuildGearsetItemIds(gsm);
 
         foreach (var container in _playerContainers)
         {
@@ -420,8 +446,10 @@ public sealed unsafe class GlamourSortEngine
                 var hq = item->Flags.HasFlag(InventoryItem.ItemFlags.HighQuality);
                 var location = new PieceLocation(itemId, container, (ushort)s, hq);
 
-                // The same check the game uses to draw the gear-set mark on inventory icons.
-                if (gsm != null && gsm->IsItemRegisteredToGearset(item))
+                // The same check the game uses to draw the gear-set mark on inventory icons, plus a
+                // direct read of the saved gearsets as a second source (see BuildGearsetItemIds).
+                if (gearsetItemIds.Contains(itemId)
+                    || (gsm != null && gsm->IsItemRegisteredToGearset(item)))
                 {
                     gearset.Add(location);
                     continue;
@@ -433,6 +461,9 @@ public sealed unsafe class GlamourSortEngine
                     singles[itemId] = location;
             }
         }
+
+        _log.Info($"[GlamourSorter] Gearset check: {gearsetItemIds.Count} item id(s) in saved gearsets, "
+                  + $"{gearset.Count} held piece(s) protected, {held.Count} set piece(s) + {singles.Count} loose item(s) sortable.");
 
         return (held, gearset, singles);
     }

@@ -886,13 +886,17 @@ public sealed unsafe class StoreExecutor
     // Data->ItemCount is the game's own count of valid entries in the expanded list.
     private static int CountDresser()
     {
-        var d = Dresser;
-        if (d == null || d->Data == null) return -1;
-        var limit = (int)Math.Min(d->Data->ItemCount, 8000u);
-        if (limit <= 0) limit = 8000; // counter not populated yet: count the whole list
+        // MirageManager keeps its own copy of the dresser list, so verification still works when the
+        // dresser *window*'s agent data is momentarily unreadable (the old code returned -1 forever
+        // if the window had been closed, which reported a false "couldn't read the dresser").
+        var mgr = MirageManager.Instance();
+        if (mgr == null || !mgr->PrismBoxLoaded)
+            return -1;
+
+        var ids = mgr->PrismBoxItemIds;
         var n = 0;
-        for (var i = 0; i < limit; i++)
-            if (d->Data->PrismBoxItems[i].ItemId != 0)
+        for (var i = 0; i < ids.Length; i++)
+            if (ids[i] != 0)
                 n++;
         return n;
     }
