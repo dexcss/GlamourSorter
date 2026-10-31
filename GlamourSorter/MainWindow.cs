@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Numerics;
 
 using Dalamud.Bindings.ImGui;
@@ -17,6 +18,7 @@ public sealed class MainWindow : ShellWindow
 {
     private readonly GlamourSortEngine _engine;
     private readonly StoreExecutor _executor;
+    private readonly DresserExtractor _extractor;
 
     private SortResult? _plan;
     private readonly List<StoreOutcome> _log = new();
@@ -26,11 +28,19 @@ public sealed class MainWindow : ShellWindow
     private int _manualCount;
     private int _failCount;
 
-    public MainWindow(GlamourSortEngine engine, StoreExecutor executor)
+    public MainWindow(GlamourSortEngine engine, StoreExecutor executor, DresserExtractor extractor)
         : base("GlamourSorter##Main", "Glamour Sorter", new Vector2(440f, 380f), new Vector2(1200f, 1200f))
     {
         _engine = engine;
         _executor = executor;
+        _extractor = extractor;
+        // A withdraw changes the dresser, so the preview the user is looking at is stale. Rebuilding
+        // needs the dresser window open; if it is not (extracting only needs the MirageManager data),
+        // just drop the stale preview instead of replacing it with "open your dresser" noise.
+        _extractor.OnChanged = () =>
+        {
+            _plan = _plan is { Error: null } ? _engine.BuildPlan() : null;
+        };
         _executor.OnResult = o =>
         {
             _log.Add(o);
@@ -64,6 +74,8 @@ public sealed class MainWindow : ShellWindow
         dl.AddCircleFilled(new Vector2(x + 4f * s, y), 4f * s, Theme.U32(dot));
     }
 
+    private bool AnyBusy => _executor.Busy || _extractor.Busy;
+
     // ---- page --------------------------------------------------------------------------------
 
     protected override void DrawBody()
@@ -73,6 +85,7 @@ public sealed class MainWindow : ShellWindow
         DrawOptions();
         DrawResults();
         DrawPlan();
+        DrawExtractor();
 
         // Publish the final tally once the run winds down (the card is drawn above, so the tally
         // shows from the next frame — same as before the reskin).
@@ -85,7 +98,7 @@ public sealed class MainWindow : ShellWindow
     private void DrawStatusCard()
     {
         var s = Theme.UiScale;
-        var busy = _executor.Busy;
+        var busy = AnyBusy;
         var p = ImGui.GetCursorScreenPos();
         var w = ImGui.GetContentRegionAvail().X;
         var wrapW = w - Theme.Pad * 2f;
@@ -95,8 +108,9 @@ public sealed class MainWindow : ShellWindow
 
         UiKit.Card(ImGui.GetWindowDrawList(), p, p + new Vector2(w, h), null, busy ? 0.10f : 0f);
 
-        var (label, color) = busy
+        var (label, color) = _executor.Busy
             ? ("STORING", Theme.Warn)
+            : _extractor.Busy ? ("WITHDRAWING", Theme.Warn)
             : _log.Count > 0 ? ("FINISHED", Theme.Good) : ("IDLE", Theme.Muted);
         ImGui.SetCursorScreenPos(p + new Vector2(Theme.Pad, Theme.Pad));
         UiKit.Chip(label, color);
@@ -114,7 +128,7 @@ public sealed class MainWindow : ShellWindow
     private void DrawActions()
     {
         var s = Theme.UiScale;
-        var busy = _executor.Busy;
+        var busy = AnyBusy;
         var canStoreAll = _plan is { Error: null } && _plan.Plans.Count > 0;
 
         if (busy) ImGui.BeginDisabled();
@@ -138,8 +152,16 @@ public sealed class MainWindow : ShellWindow
         {
             if (UiKit.ChipButton("##abort", "Abort", false, ImGui.GetContentRegionAvail().X))
             {
-                _executor.Abort();
-                _status = "Aborted.";
+                if (_executor.Busy)
+                {
+                    _executor.Abort();
+                    _status = "Aborted.";
+                }
+                else
+                {
+                    _extractor.Abort();
+                    _status = "Withdraw aborted.";
+                }
             }
         }
         if (busy) ImGui.EndDisabled();
@@ -159,10 +181,14 @@ public sealed class MainWindow : ShellWindow
         }
 
         var armoireRouted = 0;
+        var singles = 0;
         foreach (var p in _plan.Plans)
+        {
             if (p.Destination == StoreDestination.Armoire) armoireRouted++;
+            if (p.Kind == PlanKind.SingleItem) singles++;
+        }
 
-        _status = $"{_plan.Plans.Count} set(s) ready"
+        _status = $"{_plan.Plans.Count - singles} set(s) + {singles} loose item(s) ready"
                   + (_executor.UseArmoireForEligibleSets && armoireRouted > 0 ? $" ({armoireRouted} → Armoire)" : "")
                   + $", {_plan.AlreadyStoredDuplicates.Count} duplicate(s), "
                   + $"{_plan.GearsetPieces.Count} gear-set piece(s) left alone.";
@@ -173,7 +199,7 @@ public sealed class MainWindow : ShellWindow
         var s = Theme.UiScale;
         UiKit.Section(FontAwesomeIcon.Cog, "options");
 
-        var busy = _executor.Busy;
+        var busy = AnyBusy;
         if (busy) ImGui.BeginDisabled();
         var armoire = _executor.UseArmoireForEligibleSets;
         var now = UiKit.Toggle("##armoire-toggle", armoire);
@@ -215,16 +241,30 @@ public sealed class MainWindow : ShellWindow
         if (plan.Plans.Count == 0 && plan.AlreadyStoredDuplicates.Count == 0 && plan.GearsetPieces.Count == 0)
         {
             UiKit.Section(FontAwesomeIcon.Tasks, "preview");
-            ImGui.TextColored(Theme.Muted, "Nothing to sort. No set pieces in inventory match known outfits.");
+            ImGui.TextColored(Theme.Muted,
+                "Nothing to sort. No glamour-able set pieces or loose items are in your bags.");
             return;
         }
 
-        if (plan.Plans.Count > 0)
+        var busy = AnyBusy;
+        var setPlans = new List<SetPlan>();
+        var singlePlans = new List<SetPlan>();
+        foreach (var p in plan.Plans)
+            (p.Kind == PlanKind.SingleItem ? singlePlans : setPlans).Add(p);
+
+        if (setPlans.Count > 0)
         {
-            UiKit.Section(FontAwesomeIcon.Tasks, "preview");
-            var busy = _executor.Busy;
-            foreach (var p in plan.Plans)
+            UiKit.Section(FontAwesomeIcon.Tasks, "outfit sets");
+            foreach (var p in setPlans)
                 DrawPlanCard(p, busy);
+        }
+
+        if (singlePlans.Count > 0)
+        {
+            UiKit.Section(FontAwesomeIcon.Tshirt, "loose items");
+            ImGui.TextColored(Theme.Muted, "Glamour items that belong to no outfit set — stored one at a time.");
+            foreach (var p in singlePlans)
+                DrawSingleItemRow(p, busy);
         }
 
         if (plan.AlreadyStoredDuplicates.Count > 0)
@@ -233,7 +273,11 @@ public sealed class MainWindow : ShellWindow
             ImGui.TextColored(Theme.Warn,
                 $"{plan.AlreadyStoredDuplicates.Count} piece(s) are already in the dresser and were left in your bags:");
             foreach (var d in plan.AlreadyStoredDuplicates)
-                ImGui.BulletText($"item {d.ItemId} in {d.Container} slot {d.Slot}");
+            {
+                ItemDisplay.Icon(d.ItemId, 18f * ImGui.GetIO().FontGlobalScale);
+                ImGui.SameLine();
+                ImGui.TextColored(Theme.Muted, $"{ItemDisplay.Name(d.ItemId)}  ({d.Container} slot {d.Slot})");
+            }
         }
 
         if (plan.GearsetPieces.Count > 0)
@@ -242,7 +286,11 @@ public sealed class MainWindow : ShellWindow
             ImGui.TextColored(Theme.Warn,
                 $"{plan.GearsetPieces.Count} piece(s) were left alone because a saved gear set uses them:");
             foreach (var d in plan.GearsetPieces)
-                ImGui.BulletText($"item {d.ItemId} in {d.Container} slot {d.Slot}");
+            {
+                ItemDisplay.Icon(d.ItemId, 18f * ImGui.GetIO().FontGlobalScale);
+                ImGui.SameLine();
+                ImGui.TextColored(Theme.Muted, $"{ItemDisplay.Name(d.ItemId)}  ({d.Container} slot {d.Slot})");
+            }
         }
     }
 
@@ -253,8 +301,18 @@ public sealed class MainWindow : ShellWindow
         var destination = p.Destination == StoreDestination.Armoire && _executor.UseArmoireForEligibleSets
             ? "Armoire"
             : "Dresser";
-        var kind = p.Kind == PlanKind.CompleteExisting ? "COMPLETE" : "NEW";
-        var kindColor = p.Kind == PlanKind.CompleteExisting ? Theme.Good : Theme.Accent;
+        var kind = p.Kind switch
+        {
+            PlanKind.CompleteExisting => "COMPLETE",
+            PlanKind.SingleItem => "ITEM",
+            _ => "NEW",
+        };
+        var kindColor = p.Kind switch
+        {
+            PlanKind.CompleteExisting => Theme.Good,
+            PlanKind.SingleItem => Theme.Warn,
+            _ => Theme.Accent,
+        };
 
         var extraLines = (p.AlreadyFilled.Count > 0 ? 1 : 0) + (p.ModelDuplicateItemIds.Count > 0 ? 1 : 0);
         var rows = 1 + p.Pieces.Count + extraLines;
@@ -271,7 +329,9 @@ public sealed class MainWindow : ShellWindow
 
         foreach (var (slot, piece) in p.Pieces)
         {
-            ImGui.TextColored(Theme.Muted, $"{slot}: item {piece.ItemId} in {piece.Container} slot {piece.Slot}");
+            ItemDisplay.Icon(piece.ItemId, 18f * s);
+            ImGui.SameLine();
+            ImGui.TextColored(Theme.Muted, $"{ItemDisplay.Name(piece.ItemId)}  ({slot} · {piece.Container} slot {piece.Slot})");
             if (p.ModelDuplicateItemIds.Contains(piece.ItemId))
             {
                 ImGui.SameLine();
@@ -295,6 +355,48 @@ public sealed class MainWindow : ShellWindow
         if (busy) ImGui.EndDisabled();
 
         ImGui.SetCursorScreenPos(top + new Vector2(0f, h + Theme.Gap));
+    }
+
+    private void DrawSingleItemRow(SetPlan p, bool busy)
+    {
+        var s = Theme.UiScale;
+        var piece = p.Pieces.Values.First();
+        var category = ItemDisplay.Category(piece.ItemId);
+
+        ItemDisplay.Icon(piece.ItemId, 24f * s);
+        ImGui.SameLine();
+        ImGui.TextColored(Theme.Text, p.Set.Name);
+        ImGui.SameLine();
+        if (category.Length > 0)
+        {
+            UiKit.Chip(category, Theme.Muted);
+            ImGui.SameLine();
+        }
+        if (p.ModelDuplicateItemIds.Count > 0)
+        {
+            UiKit.Chip("model stored", Theme.Warn);
+            ImGui.SameLine();
+        }
+
+        if (busy) ImGui.BeginDisabled();
+        if (UiKit.ChipButton($"##single_{piece.ItemId}", "Store", false, 90f * s))
+        {
+            ResetCounters();
+            _plan = null;
+            _executor.StartSingle(p.Set.SetItemId, _executor.UseArmoireForEligibleSets);
+            _status = "Storing…";
+        }
+        if (busy) ImGui.EndDisabled();
+    }
+
+    private void DrawExtractor()
+    {
+        // The extractor panel owns its own buttons; while the store loop is running this whole
+        // block is disabled so a withdraw cannot race a deposit.
+        var busy = _executor.Busy;
+        if (busy) ImGui.BeginDisabled();
+        _extractor.Draw();
+        if (busy) ImGui.EndDisabled();
     }
 
     private void ResetCounters()

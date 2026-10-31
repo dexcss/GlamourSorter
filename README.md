@@ -13,6 +13,13 @@
   individual pieces inside stored outfit glamours, so a second copy of anything already stored is
   left in your bags to sell. Planned pieces that merely share an appearance with something stored
   get a "model already in dresser" hint so you can decide.
+- **Stores loose glamour items too.** Anything glamour-able that belongs to no outfit set is
+  deposited one item at a time — and skipped when that item is already anywhere in the dresser.
+- **Item names and icons everywhere.** Planned pieces, duplicates and results show the item icon,
+  name and slot category instead of a raw item id.
+- **Extractor.** Withdraw items from the dresser back into your bags: everything loose, just the
+  duplicates (keeps one of each), or one item / item type such as all rings. Handy for clearing
+  dresser space or pulling duplicates out so the sorter can re-deposit them cleanly.
 - **Preview first.** Nothing stores until you click. Scan shows every planned deposit; you confirm
   per-set or "Store All Below."
 - **Fancy UI shell.** Borderless, hand-drawn window from the shared Fancy UI kit
@@ -23,7 +30,8 @@
 ## How it works
 
 1. Reads the open Glamour Dresser (`AgentMiragePrismPrismBox->Data->PrismBoxItems`), noting which
-   entries are outfit glamours (`NumOutfitPiecesAdded != 0`) and every stored item id.
+   entries are outfit glamours (`NumOutfitPiecesAdded != 0`) and every stored item id (the extractor
+   reads `MirageManager.PrismBoxItemIds` directly and withdraws with `RestorePrismBoxItem`).
 2. Builds set membership from the `MirageStoreSetItem` sheet (11 slots, in column order: MainHand,
    OffHand, Head, Body, Hands, Legs, Feet, Earrings, Necklace, Bracelets, Ring).
 3. Builds the Armoire eligibility map from the `Cabinet` sheet (base item id → Cabinet row id).

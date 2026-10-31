@@ -59,6 +59,7 @@ public enum PlanKind
 {
     CompleteExisting,   // set is already in the dresser as an outfit; add missing pieces
     CreateNew,          // set not stored at all; enough pieces held to make a new outfit
+    SingleItem,         // one glamour item that belongs to no outfit set; stored loose
 }
 
 // Where this set should be deposited. Every set defaults to the dresser as an outfit glamour;
@@ -110,6 +111,9 @@ public sealed unsafe class GlamourSortEngine
     private Dictionary<uint, OutfitSet> _sets = new();
     // base itemId -> Cabinet row id (Armoire eligibility)
     private Dictionary<uint, uint> _cabinetIdByItem = new();
+    // every item the game flags as glamour-able (Item.IsGlamorous — the dresser's own filter);
+    // used to find loose items that belong to no outfit set
+    private HashSet<uint> _glamorousItemIds = new();
 
     private readonly CSInventoryType[] _playerContainers =
     {
@@ -137,6 +141,7 @@ public sealed unsafe class GlamourSortEngine
         _sets = new Dictionary<uint, OutfitSet>();
 
         BuildCabinetLookup();
+        BuildGlamourLookup();
 
         try
         {
@@ -222,6 +227,41 @@ public sealed unsafe class GlamourSortEngine
 
     public bool TryGetCabinetId(uint itemId, out uint cabinetId)
         => _cabinetIdByItem.TryGetValue(itemId, out cabinetId);
+
+    // Dresser eligibility is the game's own Item.IsGlamorous flag — the same filter the dresser's
+    // store list applies. Indexed once so the bag walk stays cheap.
+    private void BuildGlamourLookup()
+    {
+        _glamorousItemIds = new HashSet<uint>();
+        try
+        {
+            var sheet = _data.GetExcelSheet<Item>();
+            if (sheet == null)
+            {
+                _log.Warning("GlamourSorter: Item sheet unavailable; loose-item sorting disabled.");
+                return;
+            }
+
+            foreach (var row in sheet)
+            {
+                if (row.IsGlamorous)
+                    _glamorousItemIds.Add(row.RowId);
+            }
+
+            _log.Info($"GlamourSorter: indexed {_glamorousItemIds.Count} glamour-able items.");
+        }
+        catch (Exception ex)
+        {
+            _log.Error(ex, "GlamourSorter: failed to build glamour item lookup.");
+            _glamorousItemIds = new HashSet<uint>();
+        }
+    }
+
+    /// <summary>True when this item id is the item id of a stored outfit (a MirageStoreSetItem row).</summary>
+    public bool IsOutfitItem(uint itemId) => _sets.ContainsKey(itemId);
+
+    /// <summary>True when the dresser can store this item on its own.</summary>
+    public bool IsDresserStorable(uint itemId) => _glamorousItemIds.Contains(itemId);
 
     // A set belongs in the Armoire only when every slot the set defines is Armoire-eligible.
     // Requiring the whole set (not just the pieces we happen to hold) prevents splitting a
@@ -347,15 +387,18 @@ public sealed unsafe class GlamourSortEngine
         return true;
     }
 
-    // Scan the player's bags + armoury for glamour-able pieces that belong to any known set.
-    // Pieces registered to a saved gear set are separated out: storing one would pull it out
-    // of the gear set (the game's own outfit window hides gear-set items for the same reason).
-    private (Dictionary<uint, PieceLocation> Held, List<PieceLocation> Gearset) ScanHeldPieces()
+    // Scan the player's bags + armoury for glamour-able gear. Set pieces and loose single items
+    // are separated: set pieces feed the outfit flows, loose items are stored one-by-one.
+    // Pieces registered to a saved gear set are separated out first: storing one would pull it
+    // out of the gear set (the game's own outfit window hides gear-set items for the same reason).
+    private (Dictionary<uint, PieceLocation> Held, List<PieceLocation> Gearset, Dictionary<uint, PieceLocation> Singles)
+        ScanHeldPieces()
     {
-        var held = new Dictionary<uint, PieceLocation>();  // itemId -> first location found
+        var held = new Dictionary<uint, PieceLocation>();   // set-piece itemId -> first location
+        var singles = new Dictionary<uint, PieceLocation>(); // non-set itemId -> first location
         var gearset = new List<PieceLocation>();
         var inv = InventoryManager.Instance();
-        if (inv == null) return (held, gearset);
+        if (inv == null) return (held, gearset, singles);
 
         var gsm = RaptureGearsetModule.Instance();
 
@@ -368,8 +411,11 @@ public sealed unsafe class GlamourSortEngine
                 var item = c->GetInventorySlot(s);
                 if (item == null || item->ItemId == 0) continue;
                 var itemId = item->ItemId;
-                if (!_itemToSets.ContainsKey(itemId)) continue;
-                if (held.ContainsKey(itemId)) continue; // one physical piece is enough per slot
+
+                var isSetPiece = _itemToSets.ContainsKey(itemId);
+                if (!isSetPiece && !IsDresserStorable(itemId)) continue;
+                if (isSetPiece ? held.ContainsKey(itemId) : singles.ContainsKey(itemId))
+                    continue; // one physical piece is enough per slot
 
                 var hq = item->Flags.HasFlag(InventoryItem.ItemFlags.HighQuality);
                 var location = new PieceLocation(itemId, container, (ushort)s, hq);
@@ -381,11 +427,14 @@ public sealed unsafe class GlamourSortEngine
                     continue;
                 }
 
-                held[itemId] = location;
+                if (isSetPiece)
+                    held[itemId] = location;
+                else
+                    singles[itemId] = location;
             }
         }
 
-        return (held, gearset);
+        return (held, gearset, singles);
     }
 
     // Which set slot does this itemId occupy for a given set?
@@ -414,12 +463,12 @@ public sealed unsafe class GlamourSortEngine
             return result;
         }
 
-        var (held, gearsetPieces) = ScanHeldPieces();
+        var (held, gearsetPieces, singles) = ScanHeldPieces();
         result.GearsetPieces.AddRange(gearsetPieces);
         _log.Info($"[GlamourSorter] Scan: dresser has {storedItemIds.Count} distinct stored item id(s) "
                   + $"and {setToPrism.Count} stored outfit(s); {held.Count} set piece(s) held, "
-                  + $"{gearsetPieces.Count} gear-set piece(s) left alone.");
-        if (held.Count == 0)
+                  + $"{singles.Count} loose item(s), {gearsetPieces.Count} gear-set piece(s) left alone.");
+        if (held.Count == 0 && singles.Count == 0)
             return result; // nothing to do; empty plan
 
         var itemSheet = _data.GetExcelSheet<Item>();
@@ -521,7 +570,42 @@ public sealed unsafe class GlamourSortEngine
             return string.Compare(a.Set.Name, b.Set.Name, StringComparison.OrdinalIgnoreCase);
         });
 
+        // Loose glamour items (belonging to no outfit set) are stored one at a time. A copy that is
+        // already anywhere in the dresser — loose or inside an outfit — is the same duplicate case
+        // as a set piece: report it, leave it in the bag.
+        var singlePlans = new List<SetPlan>();
+        foreach (var (itemId, piece) in singles)
+        {
+            if (storedItemIds.Contains(itemId))
+            {
+                AddDuplicate(result, piece);
+                continue;
+            }
+
+            var plan = new SetPlan
+            {
+                Kind = PlanKind.SingleItem,
+                Destination = StoreDestination.Dresser,
+                Set = new OutfitSet { SetItemId = itemId, Name = ResolveItemName(itemSheet, itemId) },
+            };
+            // The slot is only used for logging/display on this path; the store window itself
+            // decides which hand-in slot a lone item occupies.
+            plan.Pieces[SetSlot.MainHand] = piece;
+            MarkModelDuplicates(plan, itemSheet, storedModels);
+            singlePlans.Add(plan);
+        }
+
+        singlePlans.Sort((a, b) => string.Compare(a.Set.Name, b.Set.Name, StringComparison.OrdinalIgnoreCase));
+        result.Plans.AddRange(singlePlans);
+
         return result;
+    }
+
+    private static string ResolveItemName(Lumina.Excel.ExcelSheet<Item>? itemSheet, uint itemId)
+    {
+        if (itemSheet != null && itemSheet.TryGetRow(itemId, out var row) && !row.Name.IsEmpty)
+            return row.Name.ExtractText();
+        return $"Item {itemId}";
     }
 
     // A piece can belong to more than one set; report each physical piece once.

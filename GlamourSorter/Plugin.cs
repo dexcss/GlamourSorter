@@ -13,6 +13,7 @@ public sealed class Plugin : IDalamudPlugin
 
     private readonly MainWindow _window;
     private readonly StoreExecutor _executor;
+    private readonly DresserExtractor _extractor;
     private readonly WindowSystem _windowSystem = new("GlamourSorter");
 
     public Plugin(IDalamudPluginInterface pi)
@@ -22,11 +23,12 @@ public sealed class Plugin : IDalamudPlugin
         var engine = new GlamourSortEngine(Svc.Data, Svc.Log);
         engine.BuildLookups();
         _executor = new StoreExecutor(Svc.Log, engine);
+        _extractor = new DresserExtractor(Svc.Log, engine);
 
         // Fancy UI shell: the window draws its own title bar, so it is registered with a plain
         // WindowSystem instead of ECommons' ConfigWindow wrapper (this plugin has no settings to
         // persist).
-        _window = new MainWindow(engine, _executor);
+        _window = new MainWindow(engine, _executor, _extractor);
         _windowSystem.AddWindow(_window);
         Svc.PluginInterface.UiBuilder.Draw += _windowSystem.Draw;
         Svc.PluginInterface.UiBuilder.OpenMainUi += OpenMainUi;
@@ -44,8 +46,9 @@ public sealed class Plugin : IDalamudPlugin
 
     public void Dispose()
     {
-        // Stop the framework-driven store loop before ECommons tears down its services.
+        // Stop the framework-driven loops before ECommons tears down its services.
         _executor.Abort();
+        _extractor.Abort();
         Svc.PluginInterface.UiBuilder.Draw -= _windowSystem.Draw;
         Svc.PluginInterface.UiBuilder.OpenMainUi -= OpenMainUi;
         Svc.PluginInterface.UiBuilder.OpenConfigUi -= OpenMainUi;

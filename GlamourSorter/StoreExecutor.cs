@@ -761,9 +761,12 @@ public sealed unsafe class StoreExecutor
                 if (grew || consumed)
                 {
                     outcome.Success = true;
-                    outcome.Detail = plan.Kind == PlanKind.CompleteExisting
-                        ? $"Completed set (dresser {_countBeforeStore}->{after})."
-                        : $"Stored new outfit (dresser {_countBeforeStore}->{after}).";
+                    outcome.Detail = plan.Kind switch
+                    {
+                        PlanKind.CompleteExisting => $"Completed set (dresser {_countBeforeStore}->{after}).",
+                        PlanKind.SingleItem => $"Stored item (dresser {_countBeforeStore}->{after}).",
+                        _ => $"Stored new outfit (dresser {_countBeforeStore}->{after}).",
+                    };
                 }
                 else
                 {
