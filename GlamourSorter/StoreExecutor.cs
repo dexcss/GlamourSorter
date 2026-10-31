@@ -650,6 +650,18 @@ public sealed unsafe class StoreExecutor
     {
         outcome.Destination = StoreDestination.Dresser;
 
+        // The outfit window only accepts hand-ins of one quality ("Only items of the same quality may
+        // be selected"), and a mixed selection makes the game silently refuse the store. Anchor on
+        // the quality we hold most of and hand in only pieces of that quality.
+        var nqPieces = plan.Pieces.Values.Where(piece => !piece.Hq).ToList();
+        var hqPieces = plan.Pieces.Values.Where(piece => piece.Hq).ToList();
+        var anchorPiece = nqPieces.Count > 0 && nqPieces.Count >= hqPieces.Count
+            ? nqPieces[0]
+            : hqPieces.Count > 0 ? hqPieces[0] : plan.Pieces.Values.FirstOrDefault();
+        var anchorHq = anchorPiece.Hq;
+        var matchingQualityItemIds = new HashSet<uint>(
+            plan.Pieces.Values.Where(piece => piece.Hq == anchorHq).Select(piece => piece.ItemId));
+
         // 1. Open the store window for this set.
         //    Open() must be anchored on a REAL inventory piece belonging to the set — its
         //    itemId + container + slot. Passing the MirageStoreSetItem row id with no source
@@ -665,8 +677,8 @@ public sealed unsafe class StoreExecutor
                 return true;
             }
 
-            // Pick any one physical piece from the plan to anchor the flow.
-            var anchor = plan.Pieces.Values.FirstOrDefault();
+            // Pick a physical piece of the anchored quality to open the flow.
+            var anchor = anchorPiece;
             if (anchor.ItemId == 0)
             {
                 outcome.Detail = "No source piece to open with.";
@@ -745,7 +757,8 @@ public sealed unsafe class StoreExecutor
                 // it, which the game then silently refused.
                 if (items[i].InventoryType == 9999
                     && flag == 2
-                    && ownedItemIds.Contains(items[i].ItemId))
+                    && ownedItemIds.Contains(items[i].ItemId)
+                    && matchingQualityItemIds.Contains(items[i].ItemId))
                 {
                     target = i;
                     break;
@@ -754,6 +767,14 @@ public sealed unsafe class StoreExecutor
 
             if (target == null)
             {
+                var qualitySkipped = 0;
+                foreach (var piece in plan.Pieces.Values)
+                    if (!handedPieces.Contains(piece.ItemId) && !matchingQualityItemIds.Contains(piece.ItemId))
+                        qualitySkipped++;
+                if (qualitySkipped > 0)
+                    _log.Info($"[GlamourSorter] {plan.Set.Name}: skipped {qualitySkipped} piece(s) of a different "
+                              + $"quality (outfit quality {(anchorHq ? "HQ" : "NQ")}).");
+
                 // Distinguish "everything we own is already inside the outfit" from "we handed in
                 // everything we could" — the first needs no store attempt at all.
                 var planned = 0;
