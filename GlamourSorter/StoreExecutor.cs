@@ -703,9 +703,17 @@ public sealed unsafe class StoreExecutor
         if (nqPieces.Count == 0 && plan.Pieces.Count > 0)
         {
             outcome.Success = false;
-            outcome.Detail = "Only HQ piece(s) — the dresser will not take HQ gear as an outfit glamour "
+            outcome.Detail = "Only HQ piece(s) — they cannot join an outfit glamour built from NQ gear "
                              + "(left for manual review).";
             _log.Info($"[GlamourSorter] {outcome.SetName}: {outcome.Detail}");
+            // Still hand the outcome to the queue: returning without a task would drop the set from
+            // the results entirely (it vanished from the list in 1.3.0.18).
+            _tm.Enqueue(() =>
+            {
+                OnResult?.Invoke(outcome);
+                return true;
+            }, $"Skip: {plan.Set.Name}",
+                new TaskManagerConfiguration { TimeLimitMS = 5000, AbortOnTimeout = false });
             return;
         }
 

@@ -398,7 +398,7 @@ public sealed class MainWindow : ShellWindow
         if (p.AlreadyFilled.Count > 0)
             ImGui.TextColored(Theme.Muted, $"Already in dresser: {string.Join(", ", p.AlreadyFilled)}");
         if (p.ModelDuplicateItemIds.Count > 0)
-            ImGui.TextColored(Theme.Muted, "Amber piece(s) share an appearance with something already stored.");
+            ImGui.TextColored(Theme.Muted, "Highlighted piece(s) share an appearance with something already stored.");
 
         if (busy) ImGui.BeginDisabled();
         if (UiKit.ChipButton($"##store_{p.Set.SetItemId}", "Store this set", false, 150f * s))

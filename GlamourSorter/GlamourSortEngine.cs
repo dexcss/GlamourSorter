@@ -633,7 +633,8 @@ public sealed unsafe class GlamourSortEngine
                 if (plan.Pieces.Count > 0)
                 {
                     MarkModelDuplicates(plan, itemSheet, storedModels);
-                    result.Plans.Add(plan);
+                    if (PruneModelDuplicates(plan, result))
+                        result.Plans.Add(plan);
                 }
             }
             else
@@ -664,7 +665,8 @@ public sealed unsafe class GlamourSortEngine
                 if (plan.Pieces.Count > 0)
                 {
                     MarkModelDuplicates(plan, itemSheet, storedModels);
-                    result.Plans.Add(plan);
+                    if (PruneModelDuplicates(plan, result))
+                        result.Plans.Add(plan);
                 }
             }
         }
@@ -727,6 +729,26 @@ public sealed unsafe class GlamourSortEngine
     // Informational only: flag planned pieces whose appearance is already in the dresser via
     // another item. Storing them is still valid (and required to complete a set), but the
     // user may prefer to sell them instead.
+    // A piece whose appearance is already in the dresser adds nothing to an outfit glamour, and the
+    // game refuses mixing quality inside an existing outfit (an HQ spare cannot join an outfit built
+    // from NQ pieces). Drop such pieces from the plan and report them as duplicates — the bag copy is
+    // then spare and can be sold. A plan left with no pieces disappears entirely.
+    private static bool PruneModelDuplicates(SetPlan plan, SortResult result)
+    {
+        if (plan.ModelDuplicateItemIds.Count == 0)
+            return plan.Pieces.Count > 0;
+
+        foreach (var (slot, piece) in plan.Pieces.ToList())
+        {
+            if (!plan.ModelDuplicateItemIds.Contains(piece.ItemId))
+                continue;
+            plan.Pieces.Remove(slot);
+            AddDuplicate(result, piece);
+        }
+
+        return plan.Pieces.Count > 0;
+    }
+
     private static void MarkModelDuplicates(
         SetPlan plan,
         Lumina.Excel.ExcelSheet<Item>? itemSheet,
