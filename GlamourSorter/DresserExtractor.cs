@@ -649,29 +649,40 @@ public sealed unsafe class DresserExtractor
     private void DrawConsolidationBlock()
     {
         UiKit.Section(FontAwesomeIcon.LayerGroup, "set pieces stored loose");
-        if (_looseSetSlots.Count == 0)
-        {
-            ImGui.TextColored(Theme.Muted, "No outfit set is stored as individual pieces — nothing to pack.");
-            ImGui.Dummy(new Vector2(0f, Theme.Gap));
-            return;
-        }
 
-        var alreadyOutfits = 0;
-        foreach (var set in _looseSetSets)
-            if (set.AlreadyStoredAsOutfit) alreadyOutfits++;
-        var freed = Math.Max(0, _looseSetSlots.Count - (_looseSetSets.Count - alreadyOutfits));
-
+        var hasSets = _looseSetSlots.Count > 0;
         ImGui.PushTextWrapPos(ImGui.GetCursorPosX() + ImGui.GetContentRegionAvail().X);
-        ImGui.TextColored(Theme.Muted,
-            $"{_looseSetSlots.Count} piece(s) from {_looseSetSets.Count} outfit set(s) are stored individually. "
-            + $"Withdrawing them lets Store All pack each set into one outfit glamour — about {freed} dresser slot(s) freed.");
+        if (hasSets)
+        {
+            var alreadyOutfits = 0;
+            foreach (var set in _looseSetSets)
+                if (set.AlreadyStoredAsOutfit) alreadyOutfits++;
+            var freed = Math.Max(0, _looseSetSlots.Count - (_looseSetSets.Count - alreadyOutfits));
+
+            ImGui.TextColored(Theme.Muted,
+                $"{_looseSetSlots.Count} piece(s) from {_looseSetSets.Count} outfit set(s) are stored individually. "
+                + $"The button withdraws a set's pieces, packs them back as one outfit glamour, and repeats — "
+                + $"about {freed} dresser slot(s) freed.");
+        }
+        else
+        {
+            ImGui.TextColored(Theme.Muted,
+                "No outfit set is stored as individual pieces — nothing to pack into an outfit.");
+        }
         ImGui.PopTextWrapPos();
         ImGui.Dummy(new Vector2(0f, Theme.Gap));
 
-        var can = !_running && _looseSetSlots.Count > 0;
+        var can = !_running && hasSets;
+        var label = _armed == Armed.Consolidate
+            ? _armedConfirm
+            : hasSets
+                ? $"Withdraw & re-deposit sets ({_looseSetSets.Count})"
+                : "No sets to withdraw & re-deposit";
+
         if (!can) ImGui.BeginDisabled();
-        var label = _armed == Armed.Consolidate ? _armedConfirm : "Withdraw set pieces";
-        if (UiKit.GradientButton("##extract_consolidate", label, Theme.SurfaceAlt, Theme.Accent, 34f))
+        if (UiKit.GradientButton("##extract_consolidate", label,
+                hasSets ? Theme.SurfaceAlt : Theme.Surface, hasSets ? Theme.Accent : Theme.Muted, 34f)
+            && can)
             OnPrimaryButton(Armed.Consolidate, _looseSetSlots.Count);
         if (!can) ImGui.EndDisabled();
         ImGui.Dummy(new Vector2(0f, Theme.Gap));
@@ -768,16 +779,30 @@ public sealed unsafe class DresserExtractor
         var singles = _looseCount;
 
         var canDuplicates = duplicates > 0 && !busy;
+        var duplicatesLabel = _armed == Armed.Duplicates
+            ? _armedConfirm
+            : duplicates > 0
+                ? $"Withdraw duplicates ({duplicates})"
+                : "No duplicates to withdraw";
         if (!canDuplicates) ImGui.BeginDisabled();
-        var duplicatesLabel = _armed == Armed.Duplicates ? _armedConfirm : "Withdraw duplicates";
-        if (UiKit.GradientButton("##extract_dupes", duplicatesLabel, Theme.Accent, Theme.Warn, 36f))
+        if (UiKit.GradientButton("##extract_dupes", duplicatesLabel,
+                duplicates > 0 ? Theme.Accent : Theme.Surface,
+                duplicates > 0 ? Theme.Warn : Theme.Muted, 36f)
+            && canDuplicates)
             OnPrimaryButton(Armed.Duplicates, duplicates);
         if (!canDuplicates) ImGui.EndDisabled();
 
         var canSingles = singles > 0 && !busy;
+        var singlesLabel = _armed == Armed.AllSingles
+            ? _armedConfirm
+            : singles > 0
+                ? $"Withdraw all singles ({singles})"
+                : "No singles to withdraw";
         if (!canSingles) ImGui.BeginDisabled();
-        var singlesLabel = _armed == Armed.AllSingles ? _armedConfirm : "Withdraw all singles";
-        if (UiKit.GradientButton("##extract_singles", singlesLabel, Theme.Accent, Theme.Good, 36f))
+        if (UiKit.GradientButton("##extract_singles", singlesLabel,
+                singles > 0 ? Theme.Accent : Theme.Surface,
+                singles > 0 ? Theme.Good : Theme.Muted, 36f)
+            && canSingles)
             OnPrimaryButton(Armed.AllSingles, singles);
         if (!canSingles) ImGui.EndDisabled();
 
