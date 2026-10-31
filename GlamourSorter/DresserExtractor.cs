@@ -567,6 +567,12 @@ public sealed unsafe class DresserExtractor
             return false;
         }
 
+        if (_looseSetSets.Count == 0)
+        {
+            SetResult("Nothing to consolidate — no outfit set is stored as individual pieces.");
+            return false;
+        }
+
         var free = EmptyBagSlots();
         var budget = free - 2;
         if (budget <= 0)
@@ -589,8 +595,12 @@ public sealed unsafe class DresserExtractor
             return started;
         }
 
+        var largest = 0;
+        foreach (var set in _looseSetSets)
+            if (set.Slots.Count > largest) largest = set.Slots.Count;
+
         SetResult($"No set fits in the {budget} free bag slot(s) — free some bag space first "
-                  + $"(the largest loose set has {_looseSetSets[0].Slots.Count} piece(s)).");
+                  + $"(the largest loose set has {largest} piece(s)).");
         return false;
     }
 

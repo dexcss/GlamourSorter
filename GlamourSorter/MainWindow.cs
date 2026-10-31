@@ -5,6 +5,7 @@ using System.Numerics;
 
 using Dalamud.Bindings.ImGui;
 using Dalamud.Interface;
+using ECommons.DalamudServices;
 using GlamourSorter.FancyUI;
 
 namespace GlamourSorter;
@@ -450,24 +451,36 @@ public sealed class MainWindow : ShellWindow
         if (DateTime.UtcNow < _consolidationReadyAt)
             return;
 
-        if (_extractor.TryStartConsolidationBatch())
+        // This runs inside the window draw path, so nothing here may throw: an exception would take
+        // the whole window down (Dalamud shows its render-error panel).
+        try
         {
-            _status = "Consolidating: withdrawing the next set's pieces…";
-            _consolidationReadyAt = DateTime.UtcNow.AddSeconds(1);
-            return;
-        }
+            if (_extractor.TryStartConsolidationBatch())
+            {
+                _status = "Consolidating: withdrawing the next set's pieces…";
+                _consolidationReadyAt = DateTime.UtcNow.AddSeconds(1);
+                return;
+            }
 
-        // Give the dresser data a couple of extra checks to settle before calling it finished.
-        _consolidationEmptyChecks++;
-        if (_consolidationEmptyChecks < 3)
+            // Give the dresser data a couple of extra checks to settle before calling it finished.
+            _consolidationEmptyChecks++;
+            if (_consolidationEmptyChecks < 3)
+            {
+                _consolidationReadyAt = DateTime.UtcNow.AddSeconds(2);
+                return;
+            }
+
+            _consolidationActive = false;
+            _consolidationSetId = 0;
+            _status = "Consolidation finished (or paused — free bag space and run it again). Rescan to see the freed slots.";
+        }
+        catch (Exception ex)
         {
-            _consolidationReadyAt = DateTime.UtcNow.AddSeconds(2);
-            return;
+            _consolidationActive = false;
+            _consolidationSetId = 0;
+            _status = $"Consolidation stopped ({ex.GetType().Name}) — check /xllog and try again.";
+            Svc.Log.Error(ex, "[GlamourSorter] Consolidation loop failed.");
         }
-
-        _consolidationActive = false;
-        _consolidationSetId = 0;
-        _status = "Consolidation finished (or paused — free bag space and run it again). Rescan to see the freed slots.";
     }
 
     private void DrawWithdrawTab()
