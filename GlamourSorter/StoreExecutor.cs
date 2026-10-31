@@ -832,6 +832,28 @@ public sealed unsafe class StoreExecutor
                             + $"prismBoxIndex={storeAgent->Data->PrismBoxIndex}"
                           : ""));
 
+            // The game decides "add to pre-existing outfit" from the anchor piece, and pieces can
+            // belong to more than one set. If the outfit it picked is not this plan's outfit, storing
+            // the hand-in into it would be a cross-set mismatch the server rejects — skip instead.
+            if (storeAgent != null && storeAgent->Data != null && storeAgent->Data->StoreInExistingOutfit)
+            {
+                var boxIndex = storeAgent->Data->PrismBoxIndex;
+                var mirage = MirageManager.Instance();
+                if (mirage != null && mirage->PrismBoxLoaded
+                    && boxIndex < (uint)mirage->PrismBoxItemIds.Length)
+                {
+                    var outfitItemId = mirage->PrismBoxItemIds[(int)boxIndex] % 1_000_000u;
+                    if (outfitItemId != plan.Set.SetItemId)
+                    {
+                        outcome.Detail = "This piece also belongs to a different stored outfit — left for manual review.";
+                        _log.Warning($"[GlamourSorter] {outcome.SetName}: {outcome.Detail} "
+                                     + $"(opened outfit {outfitItemId}, plan set {plan.Set.SetItemId}).");
+                        m.Close();
+                        return true;
+                    }
+                }
+            }
+
             if (m.GlamourPrismsHeld < m.GlamourPrismsRequired)
             {
                 outcome.Detail = $"Not enough prisms ({m.GlamourPrismsHeld}/{m.GlamourPrismsRequired}).";

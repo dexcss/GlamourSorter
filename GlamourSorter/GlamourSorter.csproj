@@ -6,13 +6,13 @@
     <Nullable>enable</Nullable>
     <LangVersion>latest</LangVersion>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
-    <Version>1.3.0.10</Version>
+    <Version>1.3.0.11</Version>
     <Authors>dexcss</Authors>
     <Company>dexcss</Company>
     <Description>Sorts glamour-able gear from your inventory into the Glamour Dresser — outfit sets as outfit glamours (including seasonal sets, with the Store as Outfit Glamour checkbox dialog automated) and loose items one by one — skipping anything already stored. Includes an extractor that withdraws dresser items back to your bags: all loose items, duplicates only, or one item type such as all rings. Open your Glamour Dresser, run /gsort, review the preview, then store.</Description>
     <AssemblyName>GlamourSorter</AssemblyName>
-    <AssemblyVersion>1.3.0.10</AssemblyVersion>
-    <FileVersion>1.3.0.10</FileVersion>
+    <AssemblyVersion>1.3.0.11</AssemblyVersion>
+    <FileVersion>1.3.0.11</FileVersion>
   </PropertyGroup>
 
   <ItemGroup>
