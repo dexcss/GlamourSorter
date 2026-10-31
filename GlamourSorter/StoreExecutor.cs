@@ -947,17 +947,12 @@ public sealed unsafe class StoreExecutor
 
             if (hasCheckbox)
             {
-                // (b) one cheap default-confirm attempt before touching the checkbox.
-                if (!zeroFired && EzThrottler.Throttle($"gsort_zero_{plan.Set.SetItemId}", 600))
-                {
-                    zeroFired = true;
-                    Callback.Fire(c.Base, true, 0);
-                    _log.Info($"[GlamourSorter] Confirm {plan.Set.Name}: event 0 (checkbox dialog, "
-                              + $"checked={checkbox->IsChecked}, yesEnabled={yesEnabled}).");
-                }
-                // (c) full synthetic checkbox click, ~3/s, after giving event 0 a moment.
-                else if (zeroFired && elapsedMs >= 1200 && checkboxClicks < 15
-                         && EzThrottler.Throttle($"gsort_cb_{plan.Set.SetItemId}", 300))
+                // (b) click the checkbox FIRST. Firing the default-confirm callback (event 0) before
+                // ticking the box closed the dialog without depositing on several sets — exactly the
+                // "checkbox was never selected" symptom. Ticking the box and delivering its ButtonClick
+                // is what a real player does; Yes then enables and event 2 deposits.
+                if (!yesEnabled && checkboxClicks < 20
+                    && EzThrottler.Throttle($"gsort_cb_{plan.Set.SetItemId}", 250))
                 {
                     checkboxClicks++;
                     var delivered = DeliverCheckboxClick(checkbox, c.Base);
@@ -967,6 +962,17 @@ public sealed unsafe class StoreExecutor
                     _log.Info($"[GlamourSorter] Checkbox click {plan.Set.Name}: #{checkboxClicks} "
                               + $"eventDelivered={delivered}, checked={checkbox->IsChecked}, "
                               + $"yesEnabled={yesEnabled}->{yesNow}.");
+                }
+                // (c) fallback for dialogs whose Yes never enables from the checkbox: the old
+                // default-confirm callback, only after the checkbox path has had its chance.
+                else if (!yesEnabled && !zeroFired && elapsedMs >= 6000
+                         && EzThrottler.Throttle($"gsort_zero_{plan.Set.SetItemId}", 800))
+                {
+                    zeroFired = true;
+                    confirmAttempts++;
+                    Callback.Fire(c.Base, true, 0);
+                    _log.Info($"[GlamourSorter] Confirm {plan.Set.Name}: event 0 fallback (checkbox dialog, "
+                              + $"checked={checkbox->IsChecked}, yesEnabled={yesEnabled}).");
                 }
             }
             else if (yesEnabled)
