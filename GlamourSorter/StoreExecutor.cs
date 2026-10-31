@@ -599,6 +599,9 @@ public sealed unsafe class StoreExecutor
                 return false;
 
             var items = m.Items; // one entry per set slot, with ItemId + fill state
+            if (items.Length == 0)
+                return false; // the window is still populating its hand-in list
+
             int? target = null;
             for (var i = 0; i < items.Length; i++)
             {

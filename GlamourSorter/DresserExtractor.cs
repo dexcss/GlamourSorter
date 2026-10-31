@@ -96,7 +96,6 @@ public sealed unsafe class DresserExtractor
     private bool _awaitingClear;
     private uint _awaitExpected;
     private int _sendRefusals;
-    private DateTime _requestedSince;
     private int _runIndex;
     private int _runDone;
     private int _runTotal;
@@ -309,7 +308,6 @@ public sealed unsafe class DresserExtractor
         _runTotal = _runSlots.Count;
         _awaitingClear = false;
         _sendRefusals = 0;
-        _requestedSince = DateTime.MinValue;
         _lastSendAt = DateTime.MinValue;
         _awaitStart = DateTime.MinValue;
         _unloadedSince = DateTime.MinValue;
@@ -406,22 +404,6 @@ public sealed unsafe class DresserExtractor
             return true;
         }
 
-        // The client asks the server for a fresh dresser list around each withdrawal; a send while
-        // that request is in flight is refused, so wait for it to settle (with a watchdog).
-        if (mgr->PrismBoxRequested)
-        {
-            if (_requestedSince == DateTime.MinValue)
-                _requestedSince = DateTime.UtcNow;
-            if ((DateTime.UtcNow - _requestedSince).TotalMilliseconds > 5000)
-            {
-                FinishRun($"Stopped after {_runDone} of {_runTotal}: the dresser data stayed busy.");
-                return true;
-            }
-            _lastSendAt = DateTime.UtcNow;
-            return false;
-        }
-        _requestedSince = DateTime.MinValue;
-
         if ((DateTime.UtcNow - _lastSendAt).TotalMilliseconds < WithdrawPaceMs)
             return false;
 
@@ -470,7 +452,6 @@ public sealed unsafe class DresserExtractor
         _running = false;
         _awaitingClear = false;
         _unloadedSince = DateTime.MinValue;
-        _requestedSince = DateTime.MinValue;
         _sendRefusals = 0;
         _lastSendAt = DateTime.MinValue;
         _runSlots.Clear();

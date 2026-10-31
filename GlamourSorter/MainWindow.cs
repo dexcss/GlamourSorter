@@ -76,16 +76,31 @@ public sealed class MainWindow : ShellWindow
 
     private bool AnyBusy => _executor.Busy || _extractor.Busy;
 
+    // 0 = Deposit page, 1 = Withdraw page.
+    private int _tab;
+
     // ---- page --------------------------------------------------------------------------------
+
+    private static readonly string[] Tabs = { "Deposit", "Withdraw" };
 
     protected override void DrawBody()
     {
-        DrawStatusCard();
-        DrawActions();
-        DrawOptions();
-        DrawResults();
-        DrawPlan();
-        DrawExtractor();
+        // Two pages: deposit (scan/store) and withdraw (the dresser extractor panel).
+        _tab = UiKit.Segmented("##gsort_tabs", Tabs, _tab, ImGui.GetContentRegionAvail().X);
+        ImGui.Dummy(new Vector2(0f, Theme.Gap));
+
+        if (_tab == 0)
+        {
+            DrawStatusCard();
+            DrawActions();
+            DrawOptions();
+            DrawResults();
+            DrawPlan();
+        }
+        else
+        {
+            DrawWithdrawTab();
+        }
 
         // Publish the final tally once the run winds down (the card is drawn above, so the tally
         // shows from the next frame — same as before the reskin).
@@ -390,8 +405,19 @@ public sealed class MainWindow : ShellWindow
         if (busy) ImGui.EndDisabled();
     }
 
-    private void DrawExtractor()
+    private void DrawWithdrawTab()
     {
+        // Abort stays reachable on this page too, so a stuck withdraw can always be stopped.
+        if (_extractor.Busy)
+        {
+            if (UiKit.ChipButton("##withdraw_abort", "Abort withdraw", false, ImGui.GetContentRegionAvail().X))
+            {
+                _extractor.Abort();
+                _status = "Withdraw aborted.";
+            }
+            ImGui.Dummy(new Vector2(0f, Theme.Gap));
+        }
+
         // The extractor panel owns its own buttons; while the store loop is running this whole
         // block is disabled so a withdraw cannot race a deposit.
         var busy = _executor.Busy;
