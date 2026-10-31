@@ -640,57 +640,6 @@ public sealed unsafe class StoreExecutor
         }, $"Report: {plan.Set.Name}", new TaskManagerConfiguration { TimeLimitMS = 10000, AbortOnTimeout = false });
     }
 
-    // Direct request the store window sends: containers/slots laid out in MirageStoreSetItem column
-    // order, empty slots left Invalid/0. Used only as a retry when the UI confirm closed without a
-    // deposit, so the proven UI path stays the default.
-    private bool TryNativeStore(SetPlan plan, out string note)
-    {
-        note = "";
-        var mgr = MirageManager.Instance();
-        if (mgr == null || !mgr->PrismBoxLoaded)
-        {
-            note = "dresser data unavailable";
-            return false;
-        }
-
-        var containers = new CSInventoryType[11];
-        var slots = new ushort[11];
-        Array.Fill(containers, CSInventoryType.Invalid);
-        foreach (var (slot, piece) in plan.Pieces)
-        {
-            var index = (int)slot;
-            if (index < 0 || index >= containers.Length)
-                continue;
-            containers[index] = piece.Container;
-            slots[index] = piece.Slot;
-        }
-
-        var prismBoxIndex = plan.PrismBoxIndex;
-        var ids = mgr->PrismBoxItemIds;
-        for (var i = 0; i < ids.Length; i++)
-        {
-            if (ids[i] != 0 && ids[i] % 1_000_000u == plan.Set.SetItemId)
-            {
-                prismBoxIndex = (uint)i;
-                break;
-            }
-        }
-
-        bool sent;
-        fixed (CSInventoryType* containersPtr = containers)
-        fixed (ushort* slotsPtr = slots)
-        {
-            sent = plan.Kind == PlanKind.CompleteExisting
-                ? mgr->StoreExistingOutfit(prismBoxIndex, containersPtr, slotsPtr)
-                : mgr->StoreNewOutfit(plan.Set.SetItemId, containersPtr, slotsPtr);
-        }
-
-        note = plan.Kind == PlanKind.CompleteExisting
-            ? $"StoreExistingOutfit(index {prismBoxIndex})"
-            : $"StoreNewOutfit(set {plan.Set.SetItemId})";
-        return sent;
-    }
-
     private static int CountGlamourPrisms()
     {
         var inv = InventoryManager.Instance();
@@ -766,6 +715,9 @@ public sealed unsafe class StoreExecutor
         //    window's per-slot ItemId against our owned pieces and only hand those over.
         var ownedItemIds = new HashSet<uint>(plan.Pieces.Values.Select(p => p.ItemId));
         var fillAttempts = new Dictionary<int, int>();
+        // Pieces this run has already handed over; their slots turn Filled (3) as a result, and they
+        // must not be mistaken for pieces that were inside the outfit before we started.
+        var handedPieces = new HashSet<uint>();
         _tm.Enqueue(() =>
         {
             if (!string.IsNullOrEmpty(outcome.Detail))
@@ -787,8 +739,12 @@ public sealed unsafe class StoreExecutor
                 // 6 = the piece is already inside the stored outfit — handing a second copy
                 // into that slot would just waste it, so never target those.
                 var flag = (uint)items[i].Flag;
+                // Only Unfilled (2) slots can take a hand-in. Filled (3) means the outfit already
+                // contains that piece; AlreadyInOutfit (6) is the same from the other side; Missing (0)
+                // cannot be handed at all. Targeting 3 was handing a piece into a slot that already had
+                // it, which the game then silently refused.
                 if (items[i].InventoryType == 9999
-                    && flag != 0 && flag != 6
+                    && flag == 2
                     && ownedItemIds.Contains(items[i].ItemId))
                 {
                     target = i;
@@ -798,6 +754,36 @@ public sealed unsafe class StoreExecutor
 
             if (target == null)
             {
+                // Distinguish "everything we own is already inside the outfit" from "we handed in
+                // everything we could" — the first needs no store attempt at all.
+                var planned = 0;
+                var alreadyInside = 0;
+                foreach (var piece in plan.Pieces.Values)
+                {
+                    planned++;
+                    if (handedPieces.Contains(piece.ItemId))
+                        continue; // we just filled that slot ourselves
+                    for (var i = 0; i < items.Length; i++)
+                    {
+                        if (items[i].ItemId != piece.ItemId)
+                            continue;
+                        var flag = (uint)items[i].Flag;
+                        if (flag == 3 || flag == 6)
+                            alreadyInside++;
+                        break;
+                    }
+                }
+
+                if (planned > 0 && alreadyInside == planned)
+                {
+                    // Everything we planned is already inside the stored outfit — there is nothing to
+                    // deposit, and reporting it as an "ok" (not a failure) matches what the user sees.
+                    outcome.Success = true;
+                    outcome.Detail = "Already in the stored outfit — nothing to add.";
+                    _log.Info($"[GlamourSorter] {outcome.SetName}: {outcome.Detail}");
+                    return true;
+                }
+
                 _log.Info($"[GlamourSorter] All owned slots filled for {plan.Set.Name} "
                           + $"({m.SlotsFilled.Count}/{items.Length} slots).");
                 return true;
@@ -818,6 +804,7 @@ public sealed unsafe class StoreExecutor
             if (EzThrottler.Throttle($"gsort_fill_{plan.Set.SetItemId}_{target.Value}", 300))
             {
                 fillAttempts[target.Value] = tries + 1;
+                handedPieces.Add(items[target.Value].ItemId);
                 _log.Info($"[GlamourSorter] Handing over slot {target.Value} (item {items[target.Value].ItemId}, try {tries + 1}).");
                 m.TryHandOver(target.Value);
             }
@@ -1020,7 +1007,6 @@ public sealed unsafe class StoreExecutor
         //    The second is what makes completing an existing outfit verifiable: that deposit adds
         //    pieces to an entry that already exists and may not change the top-level slot count.
         var verifyStart = DateTime.MinValue;
-        var nativeRetryTried = false;
         _tm.Enqueue(() =>
         {
             // If a prism/error message set Detail already, keep it (skip verification).
@@ -1046,23 +1032,10 @@ public sealed unsafe class StoreExecutor
                     if (verifyStart == DateTime.MinValue)
                         verifyStart = DateTime.UtcNow;
 
-                    var waited = (DateTime.UtcNow - verifyStart).TotalMilliseconds;
-
-                    // The confirm dialog sometimes closes without depositing (observed when completing
-                    // outfits that were only just created). After 1.5 s of no deposit, send the same
-                    // request the dialog sends (StoreExistingOutfit / StoreNewOutfit) once.
-                    if (!nativeRetryTried && waited >= 1500 && plan.Kind != PlanKind.SingleItem)
-                    {
-                        nativeRetryTried = true;
-                        var sent = TryNativeStore(plan, out var nativeNote);
-                        _log.Info($"[GlamourSorter] {outcome.SetName}: confirm did not deposit; native store "
-                                  + $"{nativeNote} ({(sent ? "sent" : "refused")}).");
-                    }
-
                     // The count updates when the server response lands, and the dresser data can be
                     // briefly unreadable while it reloads — give both a few seconds, but never poll
                     // forever (a timed-out task is discarded, which would swallow the result).
-                    if (waited < 4000)
+                    if ((DateTime.UtcNow - verifyStart).TotalMilliseconds < 4000)
                         return false;
 
                     outcome.Success = false;
