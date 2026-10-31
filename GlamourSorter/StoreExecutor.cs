@@ -640,6 +640,57 @@ public sealed unsafe class StoreExecutor
         }, $"Report: {plan.Set.Name}", new TaskManagerConfiguration { TimeLimitMS = 10000, AbortOnTimeout = false });
     }
 
+    // Direct request the store window sends: containers/slots laid out in MirageStoreSetItem column
+    // order, empty slots left Invalid/0. Used only as a retry when the UI confirm closed without a
+    // deposit, so the proven UI path stays the default.
+    private bool TryNativeStore(SetPlan plan, out string note)
+    {
+        note = "";
+        var mgr = MirageManager.Instance();
+        if (mgr == null || !mgr->PrismBoxLoaded)
+        {
+            note = "dresser data unavailable";
+            return false;
+        }
+
+        var containers = new CSInventoryType[11];
+        var slots = new ushort[11];
+        Array.Fill(containers, CSInventoryType.Invalid);
+        foreach (var (slot, piece) in plan.Pieces)
+        {
+            var index = (int)slot;
+            if (index < 0 || index >= containers.Length)
+                continue;
+            containers[index] = piece.Container;
+            slots[index] = piece.Slot;
+        }
+
+        var prismBoxIndex = plan.PrismBoxIndex;
+        var ids = mgr->PrismBoxItemIds;
+        for (var i = 0; i < ids.Length; i++)
+        {
+            if (ids[i] != 0 && ids[i] % 1_000_000u == plan.Set.SetItemId)
+            {
+                prismBoxIndex = (uint)i;
+                break;
+            }
+        }
+
+        bool sent;
+        fixed (CSInventoryType* containersPtr = containers)
+        fixed (ushort* slotsPtr = slots)
+        {
+            sent = plan.Kind == PlanKind.CompleteExisting
+                ? mgr->StoreExistingOutfit(prismBoxIndex, containersPtr, slotsPtr)
+                : mgr->StoreNewOutfit(plan.Set.SetItemId, containersPtr, slotsPtr);
+        }
+
+        note = plan.Kind == PlanKind.CompleteExisting
+            ? $"StoreExistingOutfit(index {prismBoxIndex})"
+            : $"StoreNewOutfit(set {plan.Set.SetItemId})";
+        return sent;
+    }
+
     private static int CountGlamourPrisms()
     {
         var inv = InventoryManager.Instance();
@@ -786,8 +837,13 @@ public sealed unsafe class StoreExecutor
                 || !m.IsAddonReady)
                 return false;
 
+            var storeAgent = Agent;
             _log.Info($"[GlamourSorter] Store step: prisms {m.GlamourPrismsHeld}/{m.GlamourPrismsRequired}, "
-                      + $"slotsFilled={m.SlotsFilled.Count}, firstUnfilled={m.FirstUnfilledSlot?.ToString() ?? "none"}");
+                      + $"slotsFilled={m.SlotsFilled.Count}, firstUnfilled={m.FirstUnfilledSlot?.ToString() ?? "none"}"
+                      + (storeAgent != null && storeAgent->Data != null
+                          ? $", mode={(storeAgent->Data->StoreInExistingOutfit ? "existing" : "new")}, "
+                            + $"prismBoxIndex={storeAgent->Data->PrismBoxIndex}"
+                          : ""));
 
             if (m.GlamourPrismsHeld < m.GlamourPrismsRequired)
             {
@@ -964,6 +1020,7 @@ public sealed unsafe class StoreExecutor
         //    The second is what makes completing an existing outfit verifiable: that deposit adds
         //    pieces to an entry that already exists and may not change the top-level slot count.
         var verifyStart = DateTime.MinValue;
+        var nativeRetryTried = false;
         _tm.Enqueue(() =>
         {
             // If a prism/error message set Detail already, keep it (skip verification).
@@ -989,10 +1046,23 @@ public sealed unsafe class StoreExecutor
                     if (verifyStart == DateTime.MinValue)
                         verifyStart = DateTime.UtcNow;
 
+                    var waited = (DateTime.UtcNow - verifyStart).TotalMilliseconds;
+
+                    // The confirm dialog sometimes closes without depositing (observed when completing
+                    // outfits that were only just created). After 1.5 s of no deposit, send the same
+                    // request the dialog sends (StoreExistingOutfit / StoreNewOutfit) once.
+                    if (!nativeRetryTried && waited >= 1500 && plan.Kind != PlanKind.SingleItem)
+                    {
+                        nativeRetryTried = true;
+                        var sent = TryNativeStore(plan, out var nativeNote);
+                        _log.Info($"[GlamourSorter] {outcome.SetName}: confirm did not deposit; native store "
+                                  + $"{nativeNote} ({(sent ? "sent" : "refused")}).");
+                    }
+
                     // The count updates when the server response lands, and the dresser data can be
                     // briefly unreadable while it reloads — give both a few seconds, but never poll
                     // forever (a timed-out task is discarded, which would swallow the result).
-                    if ((DateTime.UtcNow - verifyStart).TotalMilliseconds < 4000)
+                    if (waited < 4000)
                         return false;
 
                     outcome.Success = false;
