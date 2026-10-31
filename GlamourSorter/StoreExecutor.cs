@@ -899,6 +899,20 @@ public sealed unsafe class StoreExecutor
                 return true;
             }
 
+            if (storeAgent != null && storeAgent->Data != null)
+            {
+                var data = storeAgent->Data;
+                _log.Info($"[GlamourSorter] SetConvert state={data->State}, itemSets={data->ItemSetCount}, "
+                          + $"numItemsInSet={data->NumItemsInSet}, handInCount={data->HandInItemCount}, "
+                          + $"handInValid={data->HandInItemValidCount}, "
+                          + $"storeExisting={data->StoreInExistingOutfit}.");
+                for (var i = 0; i < m.Items.Length && i < 11; i++)
+                {
+                    _log.Info($"[GlamourSorter]   slot {i}: item {m.Items[i].ItemId} "
+                              + $"invType={m.Items[i].InventoryType} flag={m.Items[i].Flag}");
+                }
+            }
+
             _countBeforeStore = CountDresser();
             _log.Info($"[GlamourSorter] Store {plan.Set.Name}: dresser entries before={_countBeforeStore}.");
             m.StoreAsGlamour();
@@ -927,6 +941,7 @@ public sealed unsafe class StoreExecutor
         //         checkbox tick + automated Yes).
         var confirmStarted = DateTime.MinValue;
         var confirmWaitStart = DateTime.MinValue;
+        var storeCallbackFired = false;
         var confirmAttempts = 0;
         var zeroFired = false;
         var checkboxClicks = 0;
@@ -948,6 +963,17 @@ public sealed unsafe class StoreExecutor
                 // the hand-in silently) must not swallow the rest of the run.
                 if (confirmWaitStart == DateTime.MinValue)
                     confirmWaitStart = DateTime.UtcNow;
+
+                // Fallback: the component click may not have started the store; DresserArmoire fires
+                // callback 18 ("Store as Glamour") on this addon instead. Try it once after 2 s.
+                if (!storeCallbackFired
+                    && (DateTime.UtcNow - confirmWaitStart).TotalMilliseconds > 2000)
+                {
+                    storeCallbackFired = true;
+                    Callback.Fire(m2.Base, true, 18);
+                    _log.Info($"[GlamourSorter] Confirm {plan.Set.Name}: no confirmation opened; fired "
+                              + "Store as Glamour callback 18 as a fallback.");
+                }
                 if ((DateTime.UtcNow - confirmWaitStart).TotalMilliseconds > 10000)
                 {
                     outcome.Detail = "The store window never produced a confirmation (left for manual review).";
