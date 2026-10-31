@@ -1034,31 +1034,29 @@ public sealed unsafe class StoreExecutor
                               + $"checked={checkbox->IsChecked}, yesEnabled={yesEnabled}).");
                 }
             }
-            else if (yesEnabled)
+            // Deposit confirmation, staged cheapest-first each time the game reports a usable Yes:
+            //   1) click the real Yes button (what a player does),
+            //   2) fall back to callback event 2 (the proven Yes callback),
+            //   3) fall back to callback event 0 (default confirm).
+            if (yesEnabled && EzThrottler.Throttle($"gsort_yes_{plan.Set.SetItemId}", 700))
             {
-                if (EzThrottler.Throttle($"gsort_yes_{plan.Set.SetItemId}", 500))
+                confirmAttempts++;
+                if (confirmAttempts == 1)
                 {
-                    confirmAttempts++;
-                    Callback.Fire(c.Base, true, 2);
-                    _log.Info($"[GlamourSorter] Confirm {plan.Set.Name}: event 2 (plain Yes, "
-                              + $"attempt {confirmAttempts}).");
+                    c.Yes();
+                    _log.Info($"[GlamourSorter] Confirm {plan.Set.Name}: clicked the Yes button "
+                              + $"(attempt 1, checkbox={hasCheckbox}).");
                 }
-            }
-            else if (elapsedMs >= 2000 && EzThrottler.Throttle($"gsort_zero_{plan.Set.SetItemId}", 1000))
-            {
-                // Plain dialog but Yes never enabled — fall back to the default-confirm callback.
-                confirmAttempts++;
-                Callback.Fire(c.Base, true, 0);
-                _log.Info($"[GlamourSorter] Confirm {plan.Set.Name}: event 0 fallback (plain dialog, "
-                          + $"attempt {confirmAttempts}).");
-            }
-
-            // (d) checkbox dialog: deposit the moment the game enables Yes.
-            if (hasCheckbox && yesEnabled && EzThrottler.Throttle($"gsort_cbyes_{plan.Set.SetItemId}", 500))
-            {
-                confirmAttempts++;
-                Callback.Fire(c.Base, true, 2);
-                _log.Info($"[GlamourSorter] Confirm {plan.Set.Name}: checkbox accepted, firing event 2.");
+                else if (confirmAttempts == 2)
+                {
+                    Callback.Fire(c.Base, true, 2);
+                    _log.Info($"[GlamourSorter] Confirm {plan.Set.Name}: fired event 2 (attempt 2).");
+                }
+                else if (confirmAttempts == 3)
+                {
+                    Callback.Fire(c.Base, true, 0);
+                    _log.Info($"[GlamourSorter] Confirm {plan.Set.Name}: fired event 0 (attempt 3).");
+                }
             }
 
             if (elapsedMs >= 15000 || confirmAttempts >= 12)
