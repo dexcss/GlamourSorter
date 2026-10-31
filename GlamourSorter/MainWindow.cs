@@ -22,6 +22,12 @@ public sealed class MainWindow : ShellWindow
 
     private SortResult? _plan;
     private readonly List<StoreOutcome> _log = new();
+
+    // Set consolidation loop: withdraw one set's loose pieces, store that set as an outfit, repeat.
+    private bool _consolidationActive;
+    private uint _consolidationSetId;
+    private DateTime _consolidationReadyAt = DateTime.MinValue;
+    private int _consolidationEmptyChecks;
     private string _status = "Open your Glamour Dresser, then click Scan.";
     private bool _wasBusy;
     private int _okCount;
@@ -41,17 +47,26 @@ public sealed class MainWindow : ShellWindow
         {
             _plan = _plan is { Error: null } ? _engine.BuildPlan() : null;
 
+            if (!_extractor.ConsolidationRequested)
+                return;
+
             // "Withdraw set pieces" is the first half of consolidating loose pieces into outfits; the
-            // second half is a normal store run, which re-scans and finds those sets as plans.
-            if (_extractor.ConsolidationRequested)
+            // second half stores that one set as an outfit. The loop then repeats from
+            // PumpConsolidation(), one set at a time, so bag space is only needed for one set.
+            _extractor.ConsolidationRequested = false;
+            _consolidationSetId = _extractor.ConsolidationSetId;
+            _consolidationActive = _consolidationSetId != 0;
+            _consolidationReadyAt = DateTime.UtcNow.AddSeconds(1);
+            _consolidationEmptyChecks = 0;
+            ResetCounters();
+            _log.Clear();
+            _plan = null;
+            _tab = 0;
+
+            if (_consolidationActive)
             {
-                _extractor.ConsolidationRequested = false;
-                ResetCounters();
-                _log.Clear();
-                _plan = null;
-                _executor.Start(_executor.UseArmoireForEligibleSets);
-                _status = "Set pieces withdrawn — storing them as outfit glamours…";
-                _tab = 0;
+                _executor.StartSingle(_consolidationSetId, false);
+                _status = "Consolidating: packing the withdrawn pieces into an outfit…";
             }
         };
         _executor.OnResult = o =>
@@ -98,6 +113,8 @@ public sealed class MainWindow : ShellWindow
 
     protected override void DrawBody()
     {
+        PumpConsolidation();
+
         // Two pages: deposit (scan/store) and withdraw (the dresser extractor panel).
         _tab = UiKit.Segmented("##gsort_tabs", Tabs, _tab, ImGui.GetContentRegionAvail().X);
         ImGui.Dummy(new Vector2(0f, Theme.Gap));
@@ -169,6 +186,7 @@ public sealed class MainWindow : ShellWindow
         {
             ResetCounters();
             _log.Clear();
+            _consolidationActive = false;
             // The preview is a snapshot from before the first deposit; drop it so a stale per-set
             // button cannot be clicked mid- or post-run.
             _plan = null;
@@ -182,6 +200,7 @@ public sealed class MainWindow : ShellWindow
         {
             if (UiKit.ChipButton("##abort", "Abort", false, ImGui.GetContentRegionAvail().X))
             {
+                _consolidationActive = false;
                 if (_executor.Busy)
                 {
                     _executor.Abort();
@@ -200,6 +219,7 @@ public sealed class MainWindow : ShellWindow
 
     private void DoScan()
     {
+        _consolidationActive = false;
         ResetCounters();
         _log.Clear();
         _plan = _engine.BuildPlan();
@@ -418,6 +438,38 @@ public sealed class MainWindow : ShellWindow
         if (busy) ImGui.EndDisabled();
     }
 
+    // Drives the set-consolidation loop between stages: when both the extractor and the store
+    // executor are idle, start the next set's withdraw, or finish when nothing is left / no set
+    // fits in the free bag slots.
+    private void PumpConsolidation()
+    {
+        if (!_consolidationActive)
+            return;
+        if (AnyBusy)
+            return;
+        if (DateTime.UtcNow < _consolidationReadyAt)
+            return;
+
+        if (_extractor.TryStartConsolidationBatch())
+        {
+            _status = "Consolidating: withdrawing the next set's pieces…";
+            _consolidationReadyAt = DateTime.UtcNow.AddSeconds(1);
+            return;
+        }
+
+        // Give the dresser data a couple of extra checks to settle before calling it finished.
+        _consolidationEmptyChecks++;
+        if (_consolidationEmptyChecks < 3)
+        {
+            _consolidationReadyAt = DateTime.UtcNow.AddSeconds(2);
+            return;
+        }
+
+        _consolidationActive = false;
+        _consolidationSetId = 0;
+        _status = "Consolidation finished (or paused — free bag space and run it again). Rescan to see the freed slots.";
+    }
+
     private void DrawWithdrawTab()
     {
         // Abort stays reachable on this page too, so a stuck withdraw can always be stopped.
@@ -425,6 +477,7 @@ public sealed class MainWindow : ShellWindow
         {
             if (UiKit.ChipButton("##withdraw_abort", "Abort withdraw", false, ImGui.GetContentRegionAvail().X))
             {
+                _consolidationActive = false;
                 _extractor.Abort();
                 _status = "Withdraw aborted.";
             }

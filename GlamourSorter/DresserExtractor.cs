@@ -134,6 +134,11 @@ public sealed unsafe class DresserExtractor
     /// </summary>
     public bool ConsolidationRequested { get; set; }
 
+    /// <summary>The outfit set whose pieces the current consolidation batch withdrew.</summary>
+    public uint ConsolidationSetId => _consolidationSetId;
+
+    private uint _consolidationSetId;
+
     /// <summary>Raised after a run actually changed the dresser, so the main window can re-scan.</summary>
     public Action? OnChanged;
 
@@ -531,8 +536,62 @@ public sealed unsafe class DresserExtractor
     private void Execute(Armed action)
     {
         if (action == Armed.None) return;
+
+        if (action == Armed.Consolidate)
+        {
+            TryStartConsolidationBatch();
+            return;
+        }
+
         var started = StartRun(BuildSlots(action));
-        ConsolidationRequested = started && action == Armed.Consolidate;
+        ConsolidationRequested = started && false;
+        _consolidationSetId = 0;
+    }
+
+    /// <summary>
+    /// Starts one consolidation batch: withdraws the loose pieces of the next candidate set that
+    /// fits in the free bag slots (pieces have to pass through the bags before being packed into an
+    /// outfit). The main window chains this with a store run, one set at a time, so a full dresser
+    /// with hundreds of loose set pieces can be packed without needing that much bag space at once.
+    /// </summary>
+    public bool TryStartConsolidationBatch()
+    {
+        if (_running) return false;
+
+        _snapshotDirty = true;
+        Rebuild();
+
+        if (!_loaded)
+        {
+            SetResult("Dresser data is not loaded. Open the Glamour Dresser once, then try again.");
+            return false;
+        }
+
+        var free = EmptyBagSlots();
+        var budget = free - 2;
+        if (budget <= 0)
+        {
+            SetResult($"Not enough free bag slots to move a set's pieces through your bags ({free} free).");
+            return false;
+        }
+
+        foreach (var set in _looseSetSets)
+        {
+            if (set.Slots.Count > budget)
+                continue;
+
+            var started = StartRun(new List<int>(set.Slots));
+            ConsolidationRequested = started;
+            _consolidationSetId = started ? set.SetItemId : 0;
+            if (started)
+                _log.Info($"[GlamourSorter] Dresser extractor: consolidating {set.SetName} "
+                          + $"({set.Slots.Count} loose piece(s)).");
+            return started;
+        }
+
+        SetResult($"No set fits in the {budget} free bag slot(s) — free some bag space first "
+                  + $"(the largest loose set has {_looseSetSets[0].Slots.Count} piece(s)).");
+        return false;
     }
 
     // -------------------------------------------------------------------------------------------
