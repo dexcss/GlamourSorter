@@ -58,6 +58,12 @@ public sealed unsafe class StoreExecutor
     private const int CommandRequestCabinet = 423;
     private const int CommandFinishCabinetRequest = 427;
 
+    // "Store item into the prism box" — exactly what the Glamour Creation window's Yes button
+    // sends (params: inventory type, inventory slot). No window automation needed for loose items.
+    private const int CommandStorePrismBoxItem = 2351;
+    // Glamour Prism item id; every stored piece costs one.
+    private const uint GlamourPrismItemId = 21800;
+
     private readonly IPluginLog _log;
     private readonly TaskManager _tm;
     private readonly GlamourSortEngine _engine;
@@ -312,7 +318,9 @@ public sealed unsafe class StoreExecutor
     {
         var outcome = new StoreOutcome { SetName = plan.Set.Name };
 
-        if (plan.Destination == StoreDestination.Armoire && _useArmoireForRun)
+        if (plan.Kind == PlanKind.SingleItem)
+            EnqueueSingleItemStore(plan, outcome);
+        else if (plan.Destination == StoreDestination.Armoire && _useArmoireForRun)
             EnqueueArmoireSet(plan, outcome);
         else
             EnqueueDresserSet(plan, outcome);
@@ -518,6 +526,100 @@ public sealed unsafe class StoreExecutor
     // ---------------------------------------------------------------------------------
     // Dresser path
     // ---------------------------------------------------------------------------------
+
+    // Loose glamour items (no outfit set) are stored with the game's own prism-box request command,
+    // which is exactly what the Glamour Creation window's "Yes" sends. That window is a different
+    // addon (MiragePrismPrismBoxCrystallize) and the outfit-store window never opens for these items,
+    // so there is nothing to automate: send the command and verify the dresser grew.
+    private void EnqueueSingleItemStore(SetPlan plan, StoreOutcome outcome)
+    {
+        outcome.Destination = StoreDestination.Dresser;
+
+        if (!plan.Pieces.TryGetValue(SetSlot.MainHand, out var piece) || piece.ItemId == 0)
+        {
+            outcome.Detail = "No item to store.";
+            _log.Warning($"[GlamourSorter] {outcome.SetName}: {outcome.Detail}");
+            OnResult?.Invoke(outcome);
+            return;
+        }
+
+        void Report()
+        {
+            _log.Info($"[GlamourSorter] {outcome.SetName}: {outcome.Detail}");
+            OnResult?.Invoke(outcome);
+        }
+
+        // Guard rails, then the store request itself.
+        _tm.Enqueue(() =>
+        {
+            var mgr = MirageManager.Instance();
+            if (mgr == null || !mgr->PrismBoxLoaded)
+            {
+                outcome.Detail = "Dresser data is not loaded. Open the Glamour Dresser, wait a moment, then retry.";
+                Report();
+                return true;
+            }
+
+            if (!IsPieceStillHeld(piece))
+            {
+                outcome.Detail = "The item is no longer in the bag slot that was scanned.";
+                Report();
+                return true;
+            }
+
+            var prisms = CountGlamourPrisms();
+            if (prisms < 1)
+            {
+                outcome.Detail = $"Not enough glamour prisms ({prisms}/1).";
+                Report();
+                return true;
+            }
+
+            _countBeforeStore = CountDresser();
+            _log.Info($"[GlamourSorter] Store item {plan.Set.Name}: dresser entries before={_countBeforeStore}, "
+                      + $"prisms={prisms}, {piece.Container} slot {piece.Slot}.");
+            GameMain.ExecuteCommand(CommandStorePrismBoxItem, (int)piece.Container, piece.Slot);
+            return true;
+        }, $"Store item: {plan.Set.Name}", new TaskManagerConfiguration { TimeLimitMS = 5000, AbortOnTimeout = false });
+
+        // The server response lands a moment later; accept either a new dresser entry or the item
+        // leaving the scanned bag slot.
+        var verifyStart = DateTime.MinValue;
+        _tm.Enqueue(() =>
+        {
+            if (string.IsNullOrEmpty(outcome.Detail))
+            {
+                var after = CountDresser();
+                var consumed = !IsPieceStillHeld(piece);
+                if ((_countBeforeStore >= 0 && after > _countBeforeStore) || consumed)
+                {
+                    outcome.Success = true;
+                    outcome.Detail = $"Stored item (dresser {_countBeforeStore}->{after}).";
+                }
+                else
+                {
+                    if (verifyStart == DateTime.MinValue)
+                        verifyStart = DateTime.UtcNow;
+                    if ((DateTime.UtcNow - verifyStart).TotalMilliseconds < 4000)
+                        return false;
+
+                    outcome.Success = false;
+                    outcome.Detail = after < 0
+                        ? "Couldn't read the dresser to verify the deposit (did the dresser close?)."
+                        : $"No deposit detected (dresser stayed {_countBeforeStore}).";
+                }
+            }
+
+            Report();
+            return true;
+        }, $"Report: {plan.Set.Name}", new TaskManagerConfiguration { TimeLimitMS = 10000, AbortOnTimeout = false });
+    }
+
+    private static int CountGlamourPrisms()
+    {
+        var inv = InventoryManager.Instance();
+        return inv == null ? 0 : (int)inv->GetInventoryItemCount(GlamourPrismItemId);
+    }
 
     private void EnqueueDresserSet(SetPlan plan, StoreOutcome outcome)
     {
